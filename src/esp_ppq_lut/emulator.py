@@ -146,7 +146,7 @@ def lut_forward_provider(op, values, ctx=None, **kwargs):
         in_scale, out_scale, step, rounding
     )
 
-def register_lut_op_handler():
+def register_lut_op_handler(verbose=False):
     """
     Registers the LUT operation handler globally.
     This enables hardware-aware simulation for LUT operations.
@@ -157,4 +157,6 @@ def register_lut_op_handler():
     # Inject our provider into ALL platforms in the global forward table
     for platform in OPERATION_FORWARD_TABLE:
         OPERATION_FORWARD_TABLE[platform]['LUT'] = lut_forward_provider
-    print("[ESPDL Emulator] LUT Operation Handler Registered Globally.")
+    
+    if verbose:
+        print("[ESPDL Emulator] LUT Operation Handler Registered Globally.")

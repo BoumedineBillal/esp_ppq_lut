@@ -1,0 +1,12 @@
+{
+    "idf.currentSetup": "c:\\Espressif\\frameworks\\esp-idf-v5.5",
+    "idf.openOcdConfigs": [
+        "board/esp32p4-builtin.cfg"
+    ],
+    "idf.customExtraVars": {
+        "IDF_TARGET": "esp32p4",
+        "OPENOCD_USB_ADAPTER_LOCATION": "1-8"
+    },
+    "idf.flashType": "JTAG",
+    "idf.portWin": "COM3"
+}

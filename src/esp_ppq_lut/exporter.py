@@ -13,7 +13,8 @@ class HardwareAwareEspdlExporter(EspdlExporter):
     def export(self, *args, **kwargs):
         # 1. Flip to IDEAL Mode before export starts
         # This ensures that AddLUTPattern calls op.forward() in 'Pure Math' mode
-        print("[ESPDL Exporter] Switching to IDEAL MATH for Table Generation...")
+        if getattr(self, 'verbose', False):
+            print("[ESPDL Exporter] Switching to IDEAL MATH for Table Generation...")
         GlobalMode.set(SimulationMode.IDEAL_MATH)
         
         try:
@@ -22,13 +23,17 @@ class HardwareAwareEspdlExporter(EspdlExporter):
         finally:
             # 3. Always flip back to SIMULATION Mode
             # This ensures that your next validation/verification step is bit-exact
-            print("[ESPDL Exporter] Reverting to HARDWARE SIMULATION for Validation...")
+            if getattr(self, 'verbose', False):
+                print("[ESPDL Exporter] Reverting to HARDWARE SIMULATION for Validation...")
             GlobalMode.set(SimulationMode.SIMULATION)
 
-def register_espdl_exporter():
+def register_espdl_exporter(verbose=False):
     """
     Registers the Hardware-Aware Exporter as the official handler for ESP-DL platforms.
     """
+    # Store verbosity as a class attribute for the singleton exporter behavior
+    HardwareAwareEspdlExporter.verbose = verbose
+    
     platforms = [
         TargetPlatform.ESPDL_INT8,
         TargetPlatform.ESPDL_INT16,
@@ -40,4 +45,5 @@ def register_espdl_exporter():
         # PFL.register_network_exporter replaces the library's default exporter
         # with our mode-aware decorator.
         PFL.register_network_exporter(HardwareAwareEspdlExporter, platform)
-        print(f"[ESPDL Exporter] Registered HardwareAwareExporter for: {platform.name}")
+        if verbose:
+            print(f"[ESPDL Exporter] Registered HardwareAwareExporter for: {platform.name}")

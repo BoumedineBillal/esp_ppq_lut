@@ -1,0 +1,120 @@
+{
+    "configs": {
+        "/conv/Conv": {
+            "input": {
+                "bit_width": 16,
+                "policy": {
+                    "PER_TENSOR": true,
+                    "PER_CHANNEL": false,
+                    "LINEAR": true,
+                    "FLOATING": false,
+                    "SYMMETRICAL": true,
+                    "ASYMMETRICAL": false,
+                    "POWER_OF_2": true,
+                    "DYNAMIC": false
+                },
+                "state": "ACTIVATED",
+                "quant_min": -32768,
+                "quant_max": 32767,
+                "hash": 4284600291,
+                "dominator": 4284600291
+            },
+            "conv.weight": {
+                "bit_width": 16,
+                "policy": {
+                    "PER_TENSOR": true,
+                    "PER_CHANNEL": false,
+                    "LINEAR": true,
+                    "FLOATING": false,
+                    "SYMMETRICAL": true,
+                    "ASYMMETRICAL": false,
+                    "POWER_OF_2": true,
+                    "DYNAMIC": false
+                },
+                "state": "ACTIVATED",
+                "quant_min": -32768,
+                "quant_max": 32767,
+                "hash": 1826781978,
+                "dominator": 1826781978
+            },
+            "/conv/Conv_output_0": {
+                "bit_width": 16,
+                "policy": {
+                    "PER_TENSOR": true,
+                    "PER_CHANNEL": false,
+                    "LINEAR": true,
+                    "FLOATING": false,
+                    "SYMMETRICAL": true,
+                    "ASYMMETRICAL": false,
+                    "POWER_OF_2": true,
+                    "DYNAMIC": false
+                },
+                "state": "ACTIVATED",
+                "quant_min": -32768,
+                "quant_max": 32767,
+                "hash": 1400903029,
+                "dominator": 1400903029
+            }
+        },
+        "/Tanh": {
+            "/conv/Conv_output_0": {
+                "bit_width": 16,
+                "policy": {
+                    "PER_TENSOR": true,
+                    "PER_CHANNEL": false,
+                    "LINEAR": true,
+                    "FLOATING": false,
+                    "SYMMETRICAL": true,
+                    "ASYMMETRICAL": false,
+                    "POWER_OF_2": true,
+                    "DYNAMIC": false
+                },
+                "state": "OVERLAPPED",
+                "quant_min": -32768,
+                "quant_max": 32767,
+                "hash": 1270379108,
+                "dominator": 1400903029
+            },
+            "3": {
+                "bit_width": 16,
+                "policy": {
+                    "PER_TENSOR": true,
+                    "PER_CHANNEL": false,
+                    "LINEAR": true,
+                    "FLOATING": false,
+                    "SYMMETRICAL": true,
+                    "ASYMMETRICAL": false,
+                    "POWER_OF_2": true,
+                    "DYNAMIC": false
+                },
+                "state": "ACTIVATED",
+                "quant_min": -32768,
+                "quant_max": 32767,
+                "hash": 1921767319,
+                "dominator": 1921767319
+            }
+        }
+    },
+    "dispatchings": {
+        "/conv/Conv": "ESPDL_INT16",
+        "/Tanh": "ESPDL_INT16"
+    },
+    "values": {
+        "4284600291": {
+            "scale": 0.000244140625,
+            "zero_point": 0.0
+        },
+        "1826781978": {
+            "scale": 6.103515625e-05,
+            "zero_point": 0.0
+        },
+        "1400903029": {
+            "scale": 0.000244140625,
+            "zero_point": 0.0
+        },
+        "1921767319": {
+            "scale": 3.0517578125e-05,
+            "zero_point": 0.0
+        }
+    }
+}

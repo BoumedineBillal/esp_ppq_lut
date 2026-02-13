@@ -5,108 +5,91 @@ from esp_ppq.quantization.optim import QuantizationOptimizationPass
 from esp_ppq.core import TargetPlatform
 from esp_ppq.executor.torch import OPERATION_FORWARD_TABLE
 
-class ESPDL_LUTFusionPass(QuantizationOptimizationPass):
+class EspdlLUTFusionPass(QuantizationOptimizationPass):
     """
     Graph Re-writing pass for ESP-DL Deployment.
     Converts activation operations (Swish, Sigmoid) into 'LUT' operations
     to trigger the Hardware-Accelerated Fast Path in the ESP-DL Runtime.
     """
     def __init__(self, target_ops: List[str] = ['Swish', 'Sigmoid', 'Tanh'], 
-                 verify: bool = False, deep_verify: bool = False, plot: bool = False, 
-                 output_dir: str = "outputs", lut_step: int = 32):
+                 verify: bool = False, plot: bool = False, 
+                 output_dir: str = "outputs", lut_step: int = 32,
+                 verbose: bool = False):
         super().__init__(name='ESPDL LUT Fusion Pass')
         self.target_ops = target_ops
         self.verify = verify
-        self.deep_verify = deep_verify
         self.plot = plot
         self.output_dir = output_dir
         self.lut_step = lut_step
         self.lut_count = 0
+        self.verbose = verbose
 
     def verify_compatibility(self, op: Operation) -> bool:
         """
-        The 'Safety Layer': Verifies if the operation is suitable for LUT conversion.
+        Ensures the operation is valid for LUT fusion.
+        Checks for:
+        1. Correct Target Platform (Strictly ESP-DL 16-bit)
+        2. TQC precision is exactly 16-bit
+        3. Quantable Operation (Must be calibrated)
         """
-        # Placeholder for curvature-based safety checks.
-        # Currently returns True as per architectural discussion.
+        # 1. Platform Check (Restrict to 16-bit domains)
+        if op.platform not in {
+            TargetPlatform.ESPDL_INT16, TargetPlatform.ESPDL_S3_INT16
+        }:
+            # Soft skip: Just ignore INT8 or other platforms without crashing
+            return False
+
+        # 2. Check for Quantization Configuration
+        if not hasattr(op, 'config') or op.config is None:
+            print(f"\033[91m[ESPDL Pass] Skipping {op.name}: Operation is not quantized (No TQC found).\033[0m")
+            return False
+            
+        # 3. Precision Check (Deep Verification of TQC)
+        # The LUT fast-path on ESP32-P4/S3 requires 16-bit input precision.
+        if op.input_quant_config[0].num_of_bits != 16:
+            print(f"\033[91m[ESPDL Pass] Warning: Skipping {op.name} because it is not 16-bit (Found {op.input_quant_config[0].num_of_bits}-bit).\033[0m")
+            return False
+            
         return True
 
-    def _self_audit(self, op: Operation, index: int, executor=None, calib_data=None):
+    def _self_audit(self, op: Operation, index: int):
         """
-        Performs bit-exact parity check and optional exhaustive sweep.
+        Performs a bit-exact parity check (Pivot Parity) for the newly fused LUT operation.
         """
         import os
-        import torch
-        from .patches import AddLUTPattern
         from .emulator import set_simulation_mode, SimulationMode
-        from .utils import run_numerical_verification, generate_comparison_plot, to_c_header, update_verification_manifest
+        from .utils import calculate_lut_table, run_numerical_verification, update_verification_manifest
         
-        pattern = AddLUTPattern(int16_step=self.lut_step)
         verify_dir = os.path.join(self.output_dir, "lut_verification")
         
-        metadata = {
-            "layer_name": op.name,
-            "original_type": op.attributes.get('original_op_type', 'Unknown'),
-            "parity_plot": f"lut_{index}_parity.png"
-        }
-
-        # 1. Pivot Parity Check (INT16 Domain)
-        # ---------------------------------------------------------------------
+        # 1. Ideal Math Table
         set_simulation_mode(SimulationMode.IDEAL_MATH)
-        table_ideal = pattern.calculate_lut(op, None, max=32767, min=-32768, step=self.lut_step)
+        table_ideal = calculate_lut_table(op, None, max=32767, min=-32768, step=self.lut_step)
         
+        # 2. Hardware Simulation Table
         set_simulation_mode(SimulationMode.SIMULATION)
-        table_sim = pattern.calculate_lut(op, None, max=32767, min=-32768, step=self.lut_step)
+        table_sim = calculate_lut_table(op, None, max=32767, min=-32768, step=self.lut_step)
         
+        # 3. Verification & Plotting
+        parity_filename = f"lut_{index}_parity"
         run_numerical_verification(
             table_sim.flatten()[:2048], 
             table_ideal.flatten()[:2048], 
             title=f"Parity: {op.name}", 
             is_table=True,
             output_dir=verify_dir,
-            filename=f"lut_{index}_parity"
+            filename=parity_filename,
+            verbose=self.verbose,
+            op_name=op.name,
+            op_type=op.attributes.get('original_op_type', 'Unknown')
         )
 
-        # 2. Deep Verification: Exhaustive Sweep + C Header
-        # ---------------------------------------------------------------------
-        if self.deep_verify and executor is not None:
-            print(f"[ESPDL Pass] Running Exhaustive Sweep for layer: {op.name}")
-            scale = op.input_quant_config[0].scale.item()
-            
-            # Exhaustive INT16 sweep + OOB
-            full_sweep = torch.arange(-32768, 32768, dtype=torch.float)
-            oob = torch.tensor([-40000.0, -32769.0, 32768.0, 40000.0])
-            test_data = torch.cat([oob[:2], full_sweep, oob[2:]]).view(1, 1, 1, -1) * scale
-            
-            # Simulation
-            y_sim = executor(test_data)[0]
-            
-            # Ideal Math (Dynamic Lookup)
-            from esp_ppq.executor.op.torch.default import DEFAULT_BACKEND_TABLE
-            math_fn = DEFAULT_BACKEND_TABLE[op.attributes['original_op_type']]
-            y_ideal = math_fn(op, [test_data])
-            
-            # Calibration Data Plotting
-            y_calib_sim = None
-            if calib_data is not None:
-                y_calib_sim = executor(calib_data)[0]
-
-            # Generate Artifacts
-            sweep_filename = f"lut_{index}_sweep.png"
-            header_filename = f"lut_{index}_test.h"
-            
-            generate_comparison_plot(
-                test_data, y_sim, y_ideal, 
-                x_calib=calib_data, y_calib=y_calib_sim,
-                output_path=os.path.join(verify_dir, sweep_filename)
-            )
-            to_c_header(test_data, f"input_{index}", os.path.join(verify_dir, header_filename))
-            to_c_header(y_sim, f"output_{index}", os.path.join(verify_dir, header_filename))
-            
-            metadata["sweep_plot"] = sweep_filename
-            metadata["c_header"] = header_filename
-
-        # Update JSON Manifest
+        # 4. Update JSON Manifest (Basic Parity Info)
+        metadata = {
+            "layer_name": op.name,
+            "original_type": op.attributes.get('original_op_type', 'Unknown'),
+            "parity_plot": f"{parity_filename}.png"
+        }
         update_verification_manifest(verify_dir, index, metadata)
 
     def optimize(self, graph: BaseGraph, **kwargs):
@@ -115,15 +98,9 @@ class ESPDL_LUTFusionPass(QuantizationOptimizationPass):
         """
         import os
         self.lut_count = 0
-        executor = kwargs.get('executor', None)
-        dataloader = kwargs.get('dataloader', None)
-        calib_data = None
-        if dataloader is not None:
-            # Get a sample batch for plotting
-            calib_data = dataloader[0] if isinstance(dataloader, list) else next(iter(dataloader))
         
         # Clear/Init verification directory if enabled
-        if self.verify or self.deep_verify:
+        if self.verify:
             verify_dir = os.path.join(self.output_dir, "lut_verification")
             os.makedirs(verify_dir, exist_ok=True)
             manifest_file = os.path.join(verify_dir, "mapping.json")
@@ -142,12 +119,13 @@ class ESPDL_LUTFusionPass(QuantizationOptimizationPass):
                 
                 # 3. Rename the Operation Type
                 op.type = 'LUT'
-                print(f"[ESPDL Pass] Fused {op.attributes['original_op_type']} -> LUT for operation: {op.name}")
+                if self.verbose:
+                    print(f"[ESPDL Pass] Fused {op.attributes['original_op_type']} -> LUT for operation: {op.name}")
 
                 # 4. Self-Audit (Optional)
                 self.lut_count += 1
-                if self.verify or self.deep_verify:
-                    self._self_audit(op, self.lut_count, executor=executor, calib_data=calib_data)
+                if self.verify:
+                    self._self_audit(op, self.lut_count)
 
     @property
     def is_post_quantization_pass(self) -> bool:

@@ -100,10 +100,10 @@ extern "C" void app_main(void)
     float out_scale = powf(2.0f, output_tensor->exponent);
 
     int chunk_size = input_tensor->size;
-    int num_chunks = input_data_len / chunk_size;
+    int num_chunks = input_1_len / chunk_size;
     
     ESP_LOGI(TAG, "Input Exponent: %d | Output Exponent: %d", input_tensor->exponent, output_tensor->exponent);
-    ESP_LOGI(TAG, "Processing %d chunks of size %d (Total: %d)...", num_chunks, chunk_size, input_data_len);
+    ESP_LOGI(TAG, "Processing %d chunks of size %d (Total: %d)...", num_chunks, chunk_size, input_1_len);
     
     int global_fail_count = 0;
     float global_max_diff = 0.0f;
@@ -113,7 +113,7 @@ extern "C" void app_main(void)
         // 1. Inject Chunk
         for (int i = 0; i < chunk_size; i++) {
             int g_idx = c * chunk_size + i;
-            float val = input_data[g_idx] / scale;
+            float val = input_1[g_idx] / scale;
             int rounded_val = dl::tool::round(val);
             if (rounded_val > 32767) rounded_val = 32767;
             if (rounded_val < -32768) rounded_val = -32768;
@@ -129,7 +129,7 @@ extern "C" void app_main(void)
         for (int i = 0; i < chunk_size; i++) {
             int g_idx = c * chunk_size + i;
             float hw_val = output_ptr[i] * out_scale;
-            float sim_val = expected_output[g_idx];
+            float sim_val = output_1[g_idx];
             
             float diff = fabsf(hw_val - sim_val);
             if (diff > global_max_diff) global_max_diff = diff;
@@ -138,7 +138,7 @@ extern "C" void app_main(void)
             if (output_ptr[i] != sim_int) {
                 if (global_fail_count < 10) {
                     ESP_LOGE(TAG, "MISMATCH at Chunk %d, Idx %d (Global %d): HW=%d vs Sim=%d | In=%f", 
-                             c, i, g_idx, output_ptr[i], sim_int, input_data[g_idx]);
+                             c, i, g_idx, output_ptr[i], sim_int, input_1[g_idx]);
                 }
                 global_fail_count++;
             }

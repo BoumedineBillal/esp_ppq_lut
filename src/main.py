@@ -24,14 +24,14 @@ import esp_ppq_lut as esp_lut
 # Global Configuration
 LUT_STEP = 32
 TARGET_PLATFORM = TargetPlatform.ESPDL_INT16
+VERBOSE = False # Set to True for detailed deployment logs
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "outputs")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Initialize the LUT Extension Package
 # This handles all global registrations (Op Handlers, Exporters)
-# Task: LUT Implementation Refactoring
-esp_lut.initialize(step=LUT_STEP)
+esp_lut.initialize(step=LUT_STEP, verbose=VERBOSE)
 
 # =================================================================================================
 # 2. MODEL & PIPELINE DEFINITION
@@ -44,8 +44,6 @@ class SwishModule(nn.Module):
         self.conv.weight.data.fill_(1.0) # Identity weight for pure activation test
 
     def forward(self, x):
-        x = self.conv(x)
-        x = x * torch.sigmoid(x)
         x = self.conv(x)
         x = x * torch.sigmoid(x)
         return x
@@ -79,25 +77,38 @@ def run_deployment():
     quant_pipeline.optimize(graph=graph, dataloader=[calibration_data], executor=executor)
 
     # 4. Deployment Pipeline (The 'Hardware Mapping' Stage)
-    # This pass now handles its own self-validation!
+    # This pass now handles its own bit-exact parity audit!
     deployment_pipeline = PFL.Pipeline([
-        esp_lut.ESPDL_LUTFusionPass(
-            target_ops=['Swish'], 
+        esp_lut.EspdlLUTFusionPass(
+            target_ops=['Swish'], # Supported: 'Swish', 'Sigmoid', 'Tanh'
             verify=True, 
-            deep_verify=True,
             plot=True, 
             output_dir=OUTPUT_DIR,
-            lut_step=LUT_STEP
+            lut_step=LUT_STEP,
+            verbose=VERBOSE
         )
     ])
     deployment_pipeline.optimize(graph=graph, dataloader=[calibration_data], executor=executor)
 
-    # 5. Export
+
+    # 5. Standalone Deep Verification (Optional Debug Step)
+    # NOTE: This step is designed for isolated activation verification.
+    esp_lut.run_deep_verification(
+        graph=graph, 
+        executor=executor, 
+        dataloader=[calibration_data], 
+        output_dir=OUTPUT_DIR,
+        verbose=VERBOSE
+    )
+
+
+    # 6. Export
     espdl_path = os.path.join(OUTPUT_DIR, "swish_test.espdl")
     PFL.Exporter(platform=TARGET_PLATFORM).export(
         espdl_path, graph=graph, int16_lut_step=LUT_STEP
     )
-    print(f"\n[DEPLOYMENT] Model Exported: {espdl_path}")
+    if VERBOSE:
+        print(f"\n[DEPLOYMENT] Model Exported: {espdl_path}")
 
 if __name__ == "__main__":
     run_deployment()

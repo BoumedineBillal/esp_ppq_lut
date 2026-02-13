@@ -1,73 +1,42 @@
 
 import torch
-from esp_ppq.IR import Variable
+from esp_ppq.IR import Variable, Operation
 from esp_ppq.IR.quantize import QuantableOperation
 from esp_ppq.executor.base import OPERATION_FORWARD_TABLE
+from esp_ppq.executor.op.torch.default import DEFAULT_BACKEND_TABLE, ASSERT_NUM_OF_INPUT
 from esp_ppq.parser.espdl.espdl_typedef import ExporterPatternInfo
 from esp_ppq.parser.espdl.export_patterns import AddLUTPattern
 from esp_ppq import PPQLinearQuant_toInt
 from esp_ppq.utils.round import ppq_tensor_round
+import torch.nn.functional as F
+from typing import List
 
-def patched_get_scale(self, var: Variable, info: ExporterPatternInfo) -> torch.Tensor:
-    """
-    Library Fix: Prevents the exporter from defaulting to 2^exponent scales
-    which can create mismatches with the real TQC scales used in simulation.
-    """
-    # 1. First Priority: Check if info has pre-computed exponents (ESPDL standard)
-    if info is not None and hasattr(info, 'get_var_exponents'):
-        exponent = info.get_var_exponents(var.name)
-        if exponent:
-            if isinstance(exponent, list):
-                return 2 ** exponent[0]
-            else:
-                return 2 ** exponent
-            
-    # Fallback to the real TQC scale if no metadata exponent is present
-    if hasattr(var, 'dest_ops') and len(var.dest_ops) > 0:
-        op = var.dest_ops[0]
-        if isinstance(op, QuantableOperation):
-            try:
-                idx = op.inputs.index(var)
-                return op.input_quant_config[idx].scale
-            except (ValueError, IndexError):
-                pass
-                
-    return torch.tensor(1.0, device=var.value.device if var.value is not None else 'cpu')
+def Sigmoid_forward(op: Operation, values: List[torch.Tensor], **kwargs) -> torch.Tensor:
+    ASSERT_NUM_OF_INPUT(op=op, values=values, min_num_of_input=1, max_num_of_input=1)
+    [input_value] = values
+    return torch.sigmoid(input_value)
 
-def patched_calculate_lut(self, op: QuantableOperation, info: ExporterPatternInfo, max: int, min: int, step: int = 1) -> torch.Tensor:
+def Tanh_forward(op: Operation, values: List[torch.Tensor], **kwargs) -> torch.Tensor:
+    ASSERT_NUM_OF_INPUT(op=op, values=values, min_num_of_input=1, max_num_of_input=1)
+    [input_value] = values
+    return torch.tanh(input_value)
+
+def Relu_forward(op: Operation, values: List[torch.Tensor], **kwargs) -> torch.Tensor:
+    ASSERT_NUM_OF_INPUT(op=op, values=values, min_num_of_input=1, max_num_of_input=1)
+    [input_value] = values
+    return F.relu(input_value)
+
+def patch_esp_ppq_library(verbose=False):
     """
-    Library Fix: ESP-DL interpolation requires a fencepost point (2049 points for step-32).
-    Also ensures the math used for table generation is identical to the simulation logic.
+    Registers activation forwarders to enable LUT simulation.
+    Note: We no longer monkey-patch the exporter's AddLUTPattern directly 
+    to avoid side-effects during final deployment.
     """
-    platform_dispatching_table = OPERATION_FORWARD_TABLE[op.platform]
-    # Library Fix: Ensure the operation type exists in the dispatching table
-    if op.type not in platform_dispatching_table:
-        print(f"\033[91m[CRITICAL ERROR] Operation type '{op.type}' not found in dispatching table for {op.platform.name}.\033[0m")
-        raise KeyError(f"Missing forward function for {op.type}")
-        
-    operation_forward_func = platform_dispatching_table[op.type]
+    # 2. Patch DEFAULT_BACKEND_TABLE to bypass UnaryEltwise type-checking
+    # This ensures LUT simulation can always find the correct math truth
+    DEFAULT_BACKEND_TABLE['Sigmoid'] = Sigmoid_forward
+    DEFAULT_BACKEND_TABLE['Tanh']    = Tanh_forward
+    DEFAULT_BACKEND_TABLE['Relu']    = Relu_forward
     
-    # 2049 points fix: min to max + step
-    input = torch.arange(min, max + step, step=step, dtype=torch.float)
-    
-    # Use the patched scale retrieval
-    scale = self.get_scale(op.inputs[0], info)
-    input = input * scale
-    inputs = [input]
-
-    if len(op.inputs) > 1:
-        for op_input in op.inputs[1:]:
-            inputs.append(op_input.value * self.get_scale(op_input, info))
-            
-    output = operation_forward_func(op, inputs)
-    device = op.output_quant_config[0].scale.device
-    
-    # Quantize to INT16 pivots
-    lut = PPQLinearQuant_toInt(output.to(device), op.output_quant_config[0])
-    return lut
-
-def patch_esp_ppq_library():
-    """Applies essential library fixes for ESP-DL LUT generation."""
-    AddLUTPattern.get_scale = patched_get_scale
-    AddLUTPattern.calculate_lut = patched_calculate_lut
-    print("[ESP-PPQ-LUT] Applied library monkey patches for AddLUTPattern parity.")
+    if verbose:
+        print("[ESP-PPQ-LUT] Activation forwarders registered for simulation.")

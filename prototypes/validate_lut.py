@@ -91,26 +91,29 @@ class HardwareLUT(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_tensor, in_scale, out_scale, step, rounding):
         ctx.save_for_backward(input_tensor)
+        # 1. Hardware Input Quantization
         input_int = ppq_tensor_round(input_tensor / in_scale, rounding)
         input_signed = torch.clamp(input_int, -32768, 32767)
 
+        # 2. Segment Indexing (ESP32-P4 logic)
         idx_shifted = input_signed + 32768
         base_idx = idx_shifted // step
         remainder = idx_shifted % step
-        from esp_ppq.executor.op.torch.default import DEFAULT_BACKEND_TABLE
-        math_fn = DEFAULT_BACKEND_TABLE['Swish']
 
+        # 3. Pivot Point Mapping
         x_int = (base_idx * step) - 32768
         x_real = x_int * in_scale
-        x_ideal = math_fn(None, [x_real]) 
+        x_swish = x_real * torch.sigmoid(x_real) 
 
         y_int = x_int + step
         y_real = y_int * in_scale
-        y_ideal = math_fn(None, [y_real])
+        y_swish = y_real * torch.sigmoid(y_real)
 
-        x = ppq_tensor_round(x_ideal / out_scale, rounding).clamp(-32768, 32767)
-        y = ppq_tensor_round(y_ideal / out_scale, rounding).clamp(-32768, 32767)
+        # 4. Table Value Quantization
+        x = ppq_tensor_round(x_swish / out_scale, rounding).clamp(-32768, 32767)
+        y = ppq_tensor_round(y_swish / out_scale, rounding).clamp(-32768, 32767)
 
+        # 5. Fixed-Point Linear Interpolation
         output_quant = x + torch.trunc((remainder * (y - x)) / step)
         return output_quant.clamp(-32768, 32767) * out_scale
 
@@ -215,6 +218,8 @@ pipeline.optimize(graph=graph, dataloader=[calibration_data], executor=executor,
 # Patch Swish to LUT
 for op in graph.operations.values():
     if op.type == 'Swish':
+        op.attributes['original_op_type'] = op.type
+        op.attributes['int16_lut_step'] = 32
         op.type = 'LUT'
 
 # =================================================================================================

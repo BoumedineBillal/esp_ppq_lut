@@ -1,6 +1,6 @@
 # ESP32-P4 Bit-Exact Swish LUT Validation Suite
 
-## 📄 Abstract: The Road to 100% Hardware Parity
+## Abstract: The Road to 100% Hardware Parity
 
 In standard **INT8 deployment**, Activations in `esp-dl` are calculated directly using a full table of 256 entries. This results in a 100% bit-exact match with `esp-ppq` because every possible input value is pre-calculated and stored.
 
@@ -18,7 +18,7 @@ The validated workflow follows this pipeline:
 
 ---
 
-## 🚨 Critical Technical Summary
+## Critical Technical Summary
 
 *   **The Precision-Latency Paradox**: YOLOv26n requires INT16 precision, but standard software-calculated Swish causes a **660ms+ latency spike** per layer.
 *   **The Fencepost Resolution**: Includes a global patch for `esp-ppq` to generate **2049 pivot points**, preventing out-of-bounds memory reads during hardware interpolation.
@@ -44,7 +44,7 @@ Enabling pure **INT16 Activations** recovered the mAP but introduced massive lat
 
 ---
 
-## 🛠️ The Implementation & Workflow
+## The Implementation & Workflow
 
 ### Hardware-Exact Simulation (Forward)
 We reverse-engineered the `esp-dl` source code to match:
@@ -57,7 +57,7 @@ Even if replacing the ideal Swish with the Interpolated LUT causes a slight accu
 
 ---
 
-## 📊 Visual Proof
+## Visual Proof
 
 ### High-Fidelity Swish Comparison
 The simulator ensures the hardware-accelerated LUT (Red) perfectly tracks the mathematical Ideal (Blue) at the model's calibrated scale.
@@ -71,7 +71,7 @@ We verify survival of every pivot point. The plot confirms 100% bit-exact parity
 
 ---
 
-## 💻 The Digital Twin: Implementation & Theory
+## The Digital Twin: Implementation & Theory
 
 The core of this validation suite is the `HardwareLUT` autograd function, which serves as a microscopic simulation of the ESP32-P4's silicon logic.
 
@@ -121,7 +121,7 @@ class HardwareLUT(torch.autograd.Function):
 
 ---
 
-## 🏗️ Why Separated Table Generation & Simulation are Essential
+## Why Separated Table Generation & Simulation are Essential
 
 We have pivoted from a unified simulation to a **Separated Forward Path** strategy. The LUT generation (Export) utilizes the pure mathematical function, while the Inference simulation (Digital Twin) utilizes the hardware logic.
 
@@ -141,7 +141,7 @@ This decoupling is what enables **100% Bit-Exact Parity** across the entire 65,5
 
 ---
 
-## 🧪 Test Data Selection & Exhaustive Verification
+## Test Data Selection & Exhaustive Verification
 
 To move beyond the "happy path" and achieve empirical proof of parity, the validation suite employs an **Exhaustive Sweep** strategy:
 
@@ -156,7 +156,7 @@ The test data is padded to a multiple of **1024** ($32 \times 32$). This allows 
 
 ---
 
-## 🔗 The Identity Conv2D Anchor
+## The Identity Conv2D Anchor
 
 In the validation model, we place an **Identity Conv2D** (weight=1.0, bias=None) immediately before the activation. This is required for the `esp-ppq` export engine:
 
@@ -165,7 +165,7 @@ In the validation model, we place an **Identity Conv2D** (weight=1.0, bias=None)
 
 ---
 
-## 🛠️ Usage Instructions
+## Usage Instructions
 
 1.  **Run Validation**:
     ```bash

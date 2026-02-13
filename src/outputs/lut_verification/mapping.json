@@ -1,0 +1,16 @@
+{
+    "lut_1": {
+        "layer_name": "/conv/Conv/Swish",
+        "original_type": "Swish",
+        "parity_plot": "lut_1_parity.png",
+        "sweep_plot": "lut_1_sweep.png",
+        "c_header": "lut_1_test.h"
+    },
+    "lut_2": {
+        "layer_name": "/conv_1/Conv/Swish",
+        "original_type": "Swish",
+        "parity_plot": "lut_2_parity.png",
+        "sweep_plot": "lut_2_sweep.png",
+        "c_header": "lut_2_test.h"
+    }
+}

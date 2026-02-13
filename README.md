@@ -521,9 +521,9 @@ esp_ppq_lut/
 
 ### Prerequisites
 
-- **Python 3.8+** with PyTorch
+- **Python 3.9+** with PyTorch
 - **[esp-ppq](https://github.com/espressif/esp-ppq)**  Espressif's fork of PPQ for quantization
-- **[ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/latest/esp32p4/get-started/)** v5.x (for firmware validation only)
+- **[ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/latest/esp32p4/get-started/)** v5.5 (for firmware validation only)
 - **[esp-dl](https://github.com/espressif/esp-dl)**  Deep Learning inference library for ESP32 (firmware dependency)
 
 ### Quick Start  Single Activation

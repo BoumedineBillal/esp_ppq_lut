@@ -113,7 +113,7 @@ For the maximum INT16 input of `32767`:
 + input = torch.arange(min, max + step, step=step, dtype=torch.float) # 2049 points ✅
 ```
 
-This is the **universal fix** — it works correctly for both INT8 direct mapping (`step=1` → 256 points) and INT16 interpolated mode (`step=32` → 2,049 points).
+This is the **universal fix** it works correctly for both INT8 direct mapping (`step=1` → 256 points) and INT16 interpolated mode (`step=32` → 2,049 points).
 
 ---
 

@@ -1,9 +1,0 @@
-{
-    "lut_1": {
-        "layer_name": "/Tanh",
-        "original_type": "Tanh",
-        "parity_plot": "lut_1_parity.png",
-        "sweep_plot": "lut_1_sweep.png",
-        "c_header": "lut_1_test.h"
-    }
-}

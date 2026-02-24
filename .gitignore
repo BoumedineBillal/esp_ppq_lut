@@ -3,3 +3,11 @@ managed_components/
 sdkconfig
 sdkconfig.old
 dependencies.lock
+
+# Deprecated / old test directories
+src/outputs/
+src/main.py
+test_mini_model/
+test_yolo26_pre/
+tests_3_layers/
+test_yolo/generate_assets.py

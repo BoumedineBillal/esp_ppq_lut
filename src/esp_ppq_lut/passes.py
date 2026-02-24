@@ -54,43 +54,14 @@ class EspdlLUTFusionPass(QuantizationOptimizationPass):
 
     def _self_audit(self, op: Operation, index: int):
         """
-        Performs a bit-exact parity check (Pivot Parity) for the newly fused LUT operation.
+        [DEPRECATED] Python-vs-Python parity check.
+        Use firmware dual-mode validation (HW vs SIMULATION / HW vs IDEAL_MATH) instead.
         """
-        import os
-        from .emulator import set_simulation_mode, SimulationMode
-        from .utils import calculate_lut_table, run_numerical_verification, update_verification_manifest
-        
-        verify_dir = os.path.join(self.output_dir, "lut_verification")
-        
-        # 1. Ideal Math Table
-        set_simulation_mode(SimulationMode.IDEAL_MATH)
-        table_ideal = calculate_lut_table(op, None, max=32767, min=-32768, step=self.lut_step)
-        
-        # 2. Hardware Simulation Table
-        set_simulation_mode(SimulationMode.SIMULATION)
-        table_sim = calculate_lut_table(op, None, max=32767, min=-32768, step=self.lut_step)
-        
-        # 3. Verification & Plotting
-        parity_filename = f"lut_{index}_parity"
-        run_numerical_verification(
-            table_sim.flatten()[:2048], 
-            table_ideal.flatten()[:2048], 
-            title=f"Parity: {op.name}", 
-            is_table=True,
-            output_dir=verify_dir,
-            filename=parity_filename,
-            verbose=self.verbose,
-            op_name=op.name,
-            op_type=op.attributes.get('original_op_type', 'Unknown')
+        import warnings
+        warnings.warn(
+            "_self_audit is deprecated. Use firmware dual-mode test for bit-exact validation.",
+            DeprecationWarning, stacklevel=2
         )
-
-        # 4. Update JSON Manifest (Basic Parity Info)
-        metadata = {
-            "layer_name": op.name,
-            "original_type": op.attributes.get('original_op_type', 'Unknown'),
-            "parity_plot": f"{parity_filename}.png"
-        }
-        update_verification_manifest(verify_dir, index, metadata)
 
     def optimize(self, graph: BaseGraph, **kwargs):
         """
@@ -122,10 +93,12 @@ class EspdlLUTFusionPass(QuantizationOptimizationPass):
                 if self.verbose:
                     print(f"[ESPDL Pass] Fused {op.attributes['original_op_type']} -> LUT for operation: {op.name}")
 
-                # 4. Self-Audit (Optional)
+                # 4. Self-Audit (Deprecated — use firmware dual-mode test instead)
                 self.lut_count += 1
                 if self.verify:
-                    self._self_audit(op, self.lut_count)
+                    print(f"\n[ESPDL Pass] Note: 'verify' flag is deprecated. "
+                          f"Use firmware dual-mode validation (HW vs SIMULATION / HW vs IDEAL_MATH) "
+                          f"for bit-exact proof. Skipping Python-side parity check.")
 
     @property
     def is_post_quantization_pass(self) -> bool:

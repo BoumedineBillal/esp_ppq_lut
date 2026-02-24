@@ -29,62 +29,47 @@ class GlobalMode:
     def get(cls) -> SimulationMode:
         return cls._current_mode
 
-class HardwareEmulator(torch.autograd.Function):
+class HardwareEmulatorV0(torch.autograd.Function):
     """
-    Generalized Bit-Exact Hardware Emulator for ESP-DL LUT Operations.
-    Implements: output = x + trunc((len * (y - x)) / step)
+    [DEPRECATED] Original float-domain LUT emulator.
+    Kept for reference. Has float drift that compounds through layers.
+    Implements: output = x + trunc((len * (y - x)) / step)  in FLOAT
     """
     @staticmethod
     def forward(ctx, input_tensor, math_fn, op_context, in_scale, out_scale, step, rounding):
-        # Store context for backward pass
         ctx.math_fn = math_fn
         ctx.op_context = op_context
         ctx.save_for_backward(input_tensor)
 
-        # 1. Quantize Input to Signed INT16 range
-        # Hardware logic: input is already quantized to INT16 by previous layer
-        # Ensure scale is broadcastable [1, C, 1, 1] for [N, C, H, W]
         if isinstance(in_scale, torch.Tensor) and in_scale.ndim > 0:
             in_scale = in_scale.view(1, -1, 1, 1) if input_tensor.ndim == 4 else in_scale
             
         input_int = ppq_tensor_round(input_tensor / in_scale, rounding)
-        # Standard INT16 signed range: -32768 to 32767
         input_signed = torch.clamp(input_int, -32768, 32767).to(torch.int32)
 
-        # 2. Linear Indexing
-        # idx_shifted maps [-32768, 32767] to [0, 65535]
         idx_shifted = input_signed + 32768
         base_idx = idx_shifted // step
         remainder = idx_shifted % step
 
-        # 3. Pivot Calculation (Ideal Domain)
-        # We find the real-world values of the two nearest pivots
         x_int = (base_idx * step) - 32768
         y_int = x_int + step
         
         x_real = x_int * in_scale
         y_real = y_int * in_scale
 
-        # 4. Call Ideal Math Function for Pivots
-        # math_fn is the pure mathematical activation from OPERATION_FORWARD_TABLE
         x_ideal = math_fn(op_context, [x_real])
         y_ideal = math_fn(op_context, [y_real])
 
-        # 5. Quantize Pivots for Truncated Interpolation
-        # Hardware logic: table values are stored as INT16
         if isinstance(out_scale, torch.Tensor) and out_scale.ndim > 0:
             out_scale = out_scale.view(1, -1, 1, 1) if x_ideal.ndim == 4 else out_scale
             
         x_quant = ppq_tensor_round(x_ideal / out_scale, rounding).clamp(-32768, 32767)
         y_quant = ppq_tensor_round(y_ideal / out_scale, rounding).clamp(-32768, 32767)
 
-        # 6. ESP-DL Fixed-Point Linear Interpolation
-        # formula: x + trunc(len * (y - x) / step)
         delta_y = y_quant - x_quant
         interpolation = torch.trunc((remainder * delta_y) / step)
         output_quant = x_quant + interpolation
 
-        # 7. Rescale to Float for Pipeline Consistency
         return output_quant.clamp(-32768, 32767) * out_scale
 
     @staticmethod
@@ -93,15 +78,163 @@ class HardwareEmulator(torch.autograd.Function):
         math_fn = ctx.math_fn
         op_context = ctx.op_context
 
-        # STE (Straight-Through Estimator):
-        # We calculate the gradient of the IDEAL function for training stability
         with torch.enable_grad():
             x = input_tensor.detach().requires_grad_(True)
-            # Pull math from the registered forward tables
             y = math_fn(op_context, [x])
             grad = torch.autograd.grad(y.sum(), x)[0]
         
         return grad_output * grad, None, None, None, None, None, None
+
+
+class HardwareEmulator(torch.autograd.Function):
+    """
+    Bit-Exact Integer LUT Emulator — mirrors ESP-DL dl_module_lut.hpp exactly.
+    
+    The hardware C code (dl_module_lut.hpp:72-81):
+        int idx = input_ptr[i] + 32768;
+        int len = idx % step;
+        idx = idx / step;
+        int x = table_ptr[idx];
+        int y = table_ptr[idx + 1];
+        output_ptr[i] = x + len * (y - x) / step;
+    
+    ALL arithmetic is pure integer (C int division truncates toward zero).
+    This emulator reproduces that exactly using torch.int32 tensors.
+    """
+    # Cache: maps (op_name, step) -> int16 table tensor
+    _table_cache = {}
+
+    @staticmethod
+    def _build_table(math_fn, op_context, in_scale, out_scale, step, rounding):
+        """
+        Build the INT16 LUT table exactly as the esp-ppq exporter does.
+        Matches export_patterns.py calculate_lut():
+            input = torch.arange(min, max+1, step=step) * in_scale
+            output = operation_forward_func(op, [input])
+            lut = ppq_tensor_round(output / out_scale, rounding).clamp().to(int16)
+        """
+        # For INT16: range is [-32768, 32767], table indices are [0, 65536/step]
+        # The table has (65536 // step + 1) entries
+        n_entries = 65536 // step + 1
+        
+        # Generate the input integer indices for table pivots
+        # These are the INT16 values at each table entry
+        table_input_int = torch.arange(0, n_entries, dtype=torch.float32) * step - 32768
+        
+        # Convert to real-world float values
+        if isinstance(in_scale, torch.Tensor):
+            s = in_scale.flatten()[0].item()
+        else:
+            s = float(in_scale)
+        table_input_float = table_input_int * s
+        
+        # Compute the ideal math function output
+        table_output_float = math_fn(op_context, [table_input_float])
+        
+        # Quantize to INT16 exactly as the exporter does
+        if isinstance(out_scale, torch.Tensor):
+            os = out_scale.flatten()[0].item()
+        else:
+            os = float(out_scale)
+        table_int16 = ppq_tensor_round(table_output_float / os, rounding)
+        table_int16 = torch.clamp(table_int16, -32768, 32767).to(torch.int32)
+        
+        return table_int16.flatten()
+
+    @staticmethod
+    def forward(ctx, input_tensor, math_fn, op_context, in_scale, out_scale, step, rounding):
+        # Save for backward
+        ctx.math_fn = math_fn
+        ctx.op_context = op_context
+        ctx.save_for_backward(input_tensor)
+
+        # --- Step 1: Quantize input to INT16 ---
+        if isinstance(in_scale, torch.Tensor) and in_scale.ndim > 0:
+            in_scale_bc = in_scale.view(1, -1, 1, 1) if input_tensor.ndim == 4 else in_scale
+        else:
+            in_scale_bc = in_scale
+
+        input_int = ppq_tensor_round(input_tensor / in_scale_bc, rounding)
+        input_int = torch.clamp(input_int, -32768, 32767).to(torch.int32)
+
+        # --- Step 2: Build or retrieve the LUT table ---
+        cache_key = id(op_context)  # unique per operation instance
+        if cache_key not in HardwareEmulator._table_cache:
+            table = HardwareEmulator._build_table(
+                math_fn, op_context, in_scale, out_scale, step, rounding
+            )
+            HardwareEmulator._table_cache[cache_key] = table
+        table = HardwareEmulator._table_cache[cache_key]
+        table = table.to(input_int.device)  # ensure same device as input
+
+        # --- Step 3: Pure integer LUT interpolation (mirrors C code exactly) ---
+        # C code: int idx = input_ptr[i] + 32768;
+        idx = input_int + 32768  # shift to [0, 65535], int32
+
+        # C code: int len = idx % step;
+        remainder = idx % step  # int32 modulo
+
+        # C code: idx = idx / step;
+        #   C integer division truncates toward zero.
+        #   For non-negative idx (always true here since idx ∈ [0,65535]),
+        #   Python // is equivalent to C integer division.
+        base_idx = idx // step  # int32 floor division (same as C for non-negative)
+
+        # Clamp base_idx to valid table range
+        max_idx = table.shape[0] - 2  # -2 because we read table[idx+1]
+        base_idx = torch.clamp(base_idx, 0, max_idx)
+
+        # C code: int x = table_ptr[idx];
+        #          int y = table_ptr[idx + 1];
+        # Flatten for indexing, then reshape back
+        orig_shape = base_idx.shape
+        base_flat = base_idx.flatten().long()
+        x = table[base_flat].to(torch.int32)
+        y = table[base_flat + 1].to(torch.int32)
+
+        # C code: output_ptr[i] = x + len * (y - x) / step;
+        #   This is ALL integer arithmetic in C.
+        #   For non-negative numerator: C division truncates = Python // (floor division)
+        #   For negative numerator: C truncates toward zero, Python floors.
+        #   We must match C behavior: use (a // b) when a >= 0, else -((-a) // b)
+        remainder_flat = remainder.flatten().to(torch.int32)
+        delta = y - x  # int32
+        numerator = remainder_flat * delta  # int32
+
+        # C-style integer division (truncate toward zero)
+        # For non-negative: n // step
+        # For negative: -((-n) // step)
+        interp = torch.where(
+            numerator >= 0,
+            numerator // step,
+            -((-numerator) // step)
+        )
+
+        output_int = x + interp  # int32
+        output_int = torch.clamp(output_int, -32768, 32767)
+        output_int = output_int.view(orig_shape)
+
+        # --- Step 4: Dequantize back to float for pipeline ---
+        if isinstance(out_scale, torch.Tensor) and out_scale.ndim > 0:
+            out_scale_bc = out_scale.view(1, -1, 1, 1) if input_tensor.ndim == 4 else out_scale
+        else:
+            out_scale_bc = out_scale
+
+        return output_int.float() * out_scale_bc
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input_tensor, = ctx.saved_tensors
+        math_fn = ctx.math_fn
+        op_context = ctx.op_context
+
+        with torch.enable_grad():
+            x = input_tensor.detach().requires_grad_(True)
+            y = math_fn(op_context, [x])
+            grad = torch.autograd.grad(y.sum(), x)[0]
+        
+        return grad_output * grad, None, None, None, None, None, None
+
 
 def lut_forward_provider(op, values, ctx=None, **kwargs):
     """
@@ -121,7 +254,6 @@ def lut_forward_provider(op, values, ctx=None, **kwargs):
     step          = op.attributes['int16_lut_step']
     
     # 2. Find the Mathematical Ideal (The 'Truth')
-    # The 'Mathematical Truth' lives in the DEFAULT_BACKEND_TABLE
     if original_type not in DEFAULT_BACKEND_TABLE:
         print(f"\033[91m[CRITICAL ERROR] Math implementation for '{original_type}' not found in DEFAULT_BACKEND_TABLE.\033[0m")
         raise KeyError(f"Mathematical ground truth for {original_type} is missing.")
@@ -135,8 +267,6 @@ def lut_forward_provider(op, values, ctx=None, **kwargs):
         return ideal_math_fn(op, values)
 
     # 4. Path B: SIMULATION MODE (Default: For Validation, PTQ, and STE)
-    # We extract scales and rounding from the operation's configuration
-    # Note: These attributes are populated by PPQ during quantization
     in_scale = op.input_quant_config[0].scale
     out_scale = op.output_quant_config[0].scale
     rounding = op.input_quant_config[0].rounding

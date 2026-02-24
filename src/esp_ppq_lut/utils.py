@@ -129,7 +129,7 @@ def to_c_header(tensor, name, output_path):
     formatted_data = []
     for i in range(0, len(data), 128):
         chunk = data[i : i + 128]
-        line = ", ".join([f"{x:.6f}f" for x in chunk])
+        line = ", ".join([f"{repr(float(x))}f" for x in chunk])
         formatted_data.append(line)
     
     c_str = ",\n    ".join(formatted_data)
@@ -192,7 +192,7 @@ def calculate_lut_table(op: QuantableOperation, info: ExporterPatternInfo, max: 
         print(f"\033[91m[ESPDL Patch] Error: Scale for {op.name} is None. Ensure the graph is calibrated.\033[0m")
         raise TypeError(f"Scale for {op.name} is None. Calibration missing.")
         
-    input = input * scale
+    input = input.to(scale.device) * scale
     inputs = [input]
 
     if len(op.inputs) > 1:

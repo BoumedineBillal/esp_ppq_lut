@@ -1,58 +1,54 @@
-# ESP-PPQ LUT Bit-Exact LUT Activation Deployment for ESP32
+# ESP-PPQ LUT   Bit-Exact LUT Activation Deployment for ESP32
 
 > **A Python extension library for [esp-ppq](https://github.com/espressif/esp-ppq) that enables bit-exact Look-Up Table (LUT) based activation functions for INT16 quantized neural networks on ESP32-P4 and ESP32-S3.**
-
-<p align="center">
-  <img src="tests_3_layers/outputs/p4/swish_test/lut_verification/lut_1_sweep.png" alt="Swish INT16 LUT Hardware Simulation vs Ideal Math" width="85%">
-</p>
-
-<p align="center"><em>Exhaustive INT16 sweep (65,536 points)  Python Hardware Simulation vs Ideal F32 Math for Swish/SiLU</em></p>
 
 ---
 
 ## Table of Contents
 
-- [Motivation  Why This Exists](#motivation--why-this-exists)
+- [Motivation   Why This Exists](#motivation--why-this-exists)
   - [The YOLO26n Deployment Challenge](#the-yolo26n-deployment-challenge)
   - [The Simulation Gap](#the-simulation-gap)
   - [The Fencepost Bug](#the-fencepost-bug)
 - [The Solution](#the-solution)
 - [Architecture Overview](#architecture-overview)
-- [How It Works  The Full Pipeline](#how-it-works--the-full-pipeline)
+- [How It Works   The Full Pipeline](#how-it-works--the-full-pipeline)
   - [Phase 1: Library Initialization](#phase-1-library-initialization)
   - [Phase 2: Quantization & Graph Rewriting](#phase-2-quantization--graph-rewriting)
-  - [Phase 3: Bit-Exact Hardware Emulation](#phase-3-bit-exact-hardware-emulation)
+  - [Phase 3: Bit-Exact Integer LUT Emulation](#phase-3-bit-exact-integer-lut-emulation)
   - [Phase 4: Context-Aware Export](#phase-4-context-aware-export)
-  - [Phase 5: Verification  Python vs Hardware](#phase-5-verification--python-vs-hardware)
+- [API Usage Guide](#api-usage-guide)
+  - [Quick Integration (3 Steps)](#quick-integration-3-steps)
+  - [Full Pipeline with Mode Control](#full-pipeline-with-mode-control)
+  - [API Reference](#api-reference)
 - [Key Technical Concepts](#key-technical-concepts)
   - [INT16 LUT Interpolation on ESP-DL](#int16-lut-interpolation-on-esp-dl)
   - [The 2049-Point Table (Fencepost Fix)](#the-2049-point-table-fencepost-fix)
   - [The Dual-Mode Execution Engine](#the-dual-mode-execution-engine)
 - [Supported Activation Functions](#supported-activation-functions)
-- [Verification Results](#verification-results)
-  - [ESP32-P4](#esp32-p4)
-  - [ESP32-S3](#esp32-s3)
-  - [Firmware Validation Logs](#firmware-validation-logs)
+- [YOLO26n End-to-End Deployment](#yolo26n-end-to-end-deployment)
+  - [Engineering Decisions & Design Rationale](#engineering-decisions--design-rationale)
+  - [The 4-Test Firmware Validation Protocol](#the-4-test-firmware-validation-protocol)
+  - [Verification Results   ESP32-P4](#verification-results--esp32-p4)
+  - [Detection Results](#detection-results)
 - [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
-  - [Quick Start  Single Activation](#quick-start--single-activation)
-  - [Full Test Suite  All Activations](#full-test-suite--all-activations)
+  - [Running the YOLO26n Pipeline](#running-the-yolo26n-pipeline)
   - [Firmware Validation on Real Hardware](#firmware-validation-on-real-hardware)
-- [API Reference](#api-reference)
 - [Repository History](#repository-history)
 - [Related Work](#related-work)
 - [License](#license)
 
 ---
 
-## Motivation  Why This Exists
+## Motivation   Why This Exists
 
 ### The YOLO26n Deployment Challenge
 
-This library was born out of a real deployment problem encountered while bringing **[YOLO26n](https://github.com/BoumedineBillal/yolo26n_esp)**  a hardware-optimized YOLO architecture  to the **ESP32-P4** and **ESP32-S3** via the [esp-dl](https://github.com/espressif/esp-dl) inference framework ([PR #286](https://github.com/espressif/esp-dl/pull/286)).
+This library was born out of a real deployment problem encountered while bringing **[YOLO26n](https://github.com/BoumedineBillal/yolo26n_esp)**   a hardware-optimized YOLO architecture   to the **ESP32-P4** and **ESP32-S3** via the [esp-dl](https://github.com/espressif/esp-dl) inference framework ([PR #286](https://github.com/espressif/esp-dl/pull/286)).
 
-YOLO26n uses a **One-to-One (NMS-free) detection head** with `RegMax=1` direct regression, achieving **1.3x faster inference** than YOLOv11n. However, this architectural simplicity makes the head **extremely sensitive to quantization noise**  especially in the bounding box regression branches.
+YOLO26n uses a **One-to-One (NMS-free) detection head** with `RegMax=1` direct regression, achieving **1.3x faster inference** than YOLOv11n. However, this architectural simplicity makes the head **extremely sensitive to quantization noise**   especially in the bounding box regression branches.
 
 The journey to solve this revealed a chain of precision challenges:
 
@@ -61,7 +57,19 @@ The journey to solve this revealed a chain of precision challenges:
 | 1 | Standard INT8 (all layers) | ❌ Very low mAP | ✅ Fast | Classification OK, but regression destroyed |
 | 2 | Mixed: INT16 Conv + INT8 Activation | ❌ Still low | ✅ Fast | INT8 Swish acts as precision bottleneck between INT16 conv layers |
 | 3 | INT16 Conv + INT16 Swish (naive) | ✅ Good mAP | ❌ **~660ms/layer** | ESP-DL falls through to: `dequant → float32 Swish → requant` |
-| 4 | **INT16 LUT with interpolation** | ✅ Good mAP | ✅ Small overhead | **This library — Hardware-accelerated, 4KB per table** |
+| 4 | **INT16 LUT with interpolation** | ✅ **0.375 mAP** | ✅ 2000ms (+18%) | **This library   Hardware-accelerated, 4KB per table** |
+
+> **Note**: An earlier reported mAP of 0.362 was [invalid](https://github.com/BoumedineBillal/yolo26n_esp/issues/1)   it evaluated the wrong head (One-to-Many with NMS instead of One-to-One). The correct QAT + LUT result on the o1o head is **0.375 mAP50-95**.
+
+<p align="center">
+  <img src="assets/accuracy_comparison.png" width="700"><br>
+  <b>Figure 1</b>: Detection accuracy (mAP50-95) across quantization strategies. INT16 LUT with QAT achieves the best validated result.
+</p>
+
+<p align="center">
+  <img src="assets/latency_comparison.png" width="700"><br>
+  <b>Figure 2</b>: Inference latency on ESP32-P4. Naive INT16 Swish adds ~660ms per layer (unusable). LUT interpolation adds only 300ms total (+18%).
+</p>
 
 The critical finding: **INT16 Swish was necessary for accuracy, but the only fast path on ESP-DL is the LUT with linear interpolation**. A brute-force INT16 LUT (2¹⁶ × 2 bytes = 128KB per layer) is too large. Instead, ESP-DL supports a **compressed 4KB LUT** (2,049 entries × step size 32) with hardware-accelerated linear interpolation between entries.
 
@@ -74,12 +82,12 @@ This created a fundamental simulation problem in `esp-ppq`:
 | INT8 Activation | All 256 possible values evaluated | Direct LUT (256 entries) | ✅ Automatic match |
 | **INT16 LUT (step > 1)** | Standard float activation on dequantized input | Stepped LUT + **integer truncated linear interpolation** | ❌ **Mismatch** |
 
-For INT8, `esp-ppq`'s forward pass is automatically equivalent to the ESP-DL LUT because every possible input has a direct table entry. But for **INT16 with step > 1**, the LUT + interpolation behavior diverges from the standard activation forward  **what PPQ validates is not what the MCU actually computes.**
+For INT8, `esp-ppq`'s forward pass is automatically equivalent to the ESP-DL LUT because every possible input has a direct table entry. But for **INT16 with step > 1**, the LUT + interpolation behavior diverges from the standard activation forward   **what PPQ validates is not what the MCU actually computes.**
 
 This means:
-1. **Accuracy metrics in Python are unreliable**  they don't reflect the actual interpolation error
-2. **QAT (Quantization-Aware Training) cannot learn to compensate**  the training loop doesn't see the real hardware behavior
-3. **Debugging requires physical hardware**  no way to reproduce on-chip errors in Python
+1. **Accuracy metrics in Python are unreliable**   they don't reflect the actual interpolation error
+2. **QAT (Quantization-Aware Training) cannot learn to compensate**   the training loop doesn't see the real hardware behavior
+3. **Debugging requires physical hardware**   no way to reproduce on-chip errors in Python
 
 ### The Fencepost Bug
 
@@ -87,7 +95,7 @@ During development, this library also uncovered a **critical off-by-one bug** in
 
 The ESP-DL runtime uses linear interpolation which requires `N+1` boundaries for `N` segments:
 
-```
+```c
 // esp-dl/dl/module/include/dl_module_lut.hpp (lines 79-80)
 int x = table_ptr[idx];
 int y = table_ptr[idx + 1];  // ← Requires index idx+1 to exist!
@@ -96,13 +104,13 @@ int y = table_ptr[idx + 1];  // ← Requires index idx+1 to exist!
 But the `esp-ppq` exporter generated only `N` entries:
 
 ```python
-# esp-ppq/parser/espdl/export_patterns.py (line 647)  THE BUG
+# esp-ppq/parser/espdl/export_patterns.py (line 647)   THE BUG
 input = torch.arange(min, max + 1, step=step, dtype=torch.float)  # Generates 2048 points
 ```
 
 For the maximum INT16 input of `32767`:
 - `idx = (32767 + 32768) / 32 = 2047` → `table_ptr[2047]` ✅ Legal
-- `table_ptr[2048]` ❌ **Out-of-bounds read**  the MCU reads garbage from the next memory region
+- `table_ptr[2048]` ❌ **Out-of-bounds read**   the MCU reads garbage from the next memory region
 
 **Observed effect**: Correct outputs for negative/low-positive inputs, but a characteristic "dip" or corruption at the positive edge of the activation function (e.g., output of `1060` instead of expected `32177` for Swish at high positive values).
 
@@ -113,23 +121,23 @@ For the maximum INT16 input of `32767`:
 + input = torch.arange(min, max + step, step=step, dtype=torch.float) # 2049 points ✅
 ```
 
-This is the **universal fix** it works correctly for both INT8 direct mapping (`step=1` → 256 points) and INT16 interpolated mode (`step=32` → 2,049 points).
+This is the **universal fix**   it works correctly for both INT8 direct mapping (`step=1` → 256 points) and INT16 interpolated mode (`step=32` → 2,049 points).
 
 ---
 
 ## The Solution
 
-**`esp_ppq_lut`** is a drop-in extension library for `esp-ppq` that creates a **"Digital Twin"** of the ESP-DL LUT hardware in Python. It achieves **100% bit-exact parity** between the Python simulation and the actual ESP32 hardware execution across the entire INT16 input range (65,536 values).
+**`esp_ppq_lut`** is a drop-in extension library for `esp-ppq` that creates a **"Digital Twin"** of the ESP-DL LUT hardware in Python. It achieves **bit-exact parity** (within ±1 LSB from shared INT8 backbone rounding) between the Python simulation and the actual ESP32 hardware execution.
 
 The library:
 
-- **Emulates** the ESP-DL fixed-point LUT interpolation formula: `output = x + trunc(remainder × (y − x) / step)`
+- **Emulates** the ESP-DL fixed-point LUT interpolation in pure `torch.int32` arithmetic   zero float drift
 - **Rewrites** the computation graph to replace activation ops with `LUT` nodes (graph fusion pass)
 - **Manages** a dual-mode execution context (Ideal Math for table generation, Hardware Simulation for validation)
-- **Supports QAT**  the emulator implements `torch.autograd.Function` with a Straight-Through Estimator (STE) backward pass, enabling Quantization-Aware Training with faithful hardware behavior in the forward pass
+- **Supports QAT**   the emulator implements `torch.autograd.Function` with a Straight-Through Estimator (STE) backward pass, enabling Quantization-Aware Training with faithful hardware behavior in the forward pass
 - **Exports** hardware-ready `.espdl` model files with correct LUT tables
-- **Verifies** parity automatically with exhaustive 65,536-point sweeps and visual plots
-- **Generates** C headers and `.espdl` binaries for direct firmware validation
+- **Is activation-agnostic**   works with any activation function without code changes (Swish, Sigmoid, Tanh, or custom)
+- **Generates** firmware test projects with dual-model export for scientific A/B validation on real hardware
 
 ---
 
@@ -142,9 +150,9 @@ The library:
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐            │
 │  │ patches  │  │ emulator │  │  passes  │  │exporter │            │
 │  │          │  │          │  │          │  │         │            │
-│  │ Fix      │  │ Bit-Exact│  │ Graph    │  │ Mode-   │            │
-│  │ Backend  │──│ Hardware │──│ Rewrite  │──│ Aware   │            │
-│  │ Tables   │  │ LUT Sim  │  │ Fusion   │  │ Export  │            │
+│  │ Register │  │ Bit-Exact│  │ Graph    │  │ Mode-   │            │
+│  │ Forwarders──│ INT32 LUT│──│ Rewrite  │──│ Aware   │            │
+│  │          │  │ + Cache  │  │ Fusion   │  │ Export  │            │
 │  └──────────┘  └──────────┘  └──────────┘  └─────────┘            │
 │       │              │             │              │                 │
 │  ┌────┴──────────────┴─────────────┴──────────────┴─────┐          │
@@ -169,7 +177,7 @@ The library:
 
 ---
 
-## How It Works  The Full Pipeline
+## How It Works   The Full Pipeline
 
 ### Phase 1: Library Initialization
 
@@ -179,7 +187,7 @@ import esp_ppq_lut as esp_lut
 esp_lut.initialize(step=32, verbose=True)
 ```
 
-A single call to `initialize()` performs three critical global registrations:
+A single call to `initialize()` performs two critical global registrations:
 
 | Step | Module | What It Does |
 |------|--------|-------------|
@@ -192,51 +200,190 @@ A single call to `initialize()` performs three critical global registrations:
 After standard `esp-ppq` quantization (calibration, scale computation, etc.), the **`EspdlLUTFusionPass`** performs a "topology swap" on the computation graph:
 
 ```python
-deployment_pipeline = PFL.Pipeline([
-    esp_lut.EspdlLUTFusionPass(
-        target_ops=['Swish', 'Sigmoid', 'Tanh'],
-        verify=True,
-        output_dir="outputs",
-        lut_step=32
-    )
-])
-deployment_pipeline.optimize(graph=graph, ...)
+lut_pass = esp_lut.EspdlLUTFusionPass(
+    target_ops=['Swish'],    # Activation types to convert
+    lut_step=32              # Segment size (→ 2049-entry table)
+)
+lut_pass.optimize(graph=graph, dataloader=cali_loader, executor=executor,
+                  calib_steps=0, collate_fn=lambda x: x.to(device))
 ```
 
 For each target activation operation, the fusion pass:
 
-1. **Validates compatibility**  Checks that the operation targets an INT16 ESP-DL platform and has valid quantization configuration
-2. **Stores shadow attributes**  Saves `original_op_type` (e.g., `'Swish'`) and `int16_lut_step` (e.g., `32`) into the operation's attribute dictionary
-3. **Renames the operation**  Changes `op.type` from `'Swish'` to `'LUT'`
-4. **Self-audits (optional)**  Generates the LUT table in both Ideal Math and Simulation modes and runs a bit-exact parity check between them
+1. **Validates compatibility**   Checks that the operation targets an INT16 ESP-DL platform and has valid 16-bit quantization configuration
+2. **Stores shadow attributes**   Saves `original_op_type` (e.g., `'Swish'`) and `int16_lut_step` (e.g., `32`) into the operation's attribute dictionary
+3. **Renames the operation**   Changes `op.type` from `'Swish'` to `'LUT'`
 
-### Phase 3: Bit-Exact Hardware Emulation
+The `original_op_type` attribute is critical   it tells the emulator which mathematical function to use for the "ideal truth" when building LUT tables and computing STE gradients. This is what makes the system **activation-agnostic**: the emulator never hardcodes Swish, Sigmoid, or Tanh. It simply looks up `DEFAULT_BACKEND_TABLE[original_op_type]` at runtime.
 
-The core of the library is the **`HardwareEmulator`** class — a custom `torch.autograd.Function` that replicates the ESP-DL LUT interpolation logic step-by-step:
+### Phase 3: Bit-Exact Integer LUT Emulation
 
+The core of the library is the **`HardwareEmulator`** class   a custom `torch.autograd.Function` that replicates the ESP-DL LUT interpolation logic in pure integer arithmetic.
+
+#### The Hardware Code It Mirrors
+
+The ESP-DL C code (`dl_module_lut.hpp`, lines 72-81):
+
+```c
+int idx = input_ptr[i] + 32768;
+int len = idx % step;
+idx = idx / step;
+int x = table_ptr[idx];
+int y = table_ptr[idx + 1];
+output_ptr[i] = x + len * (y - x) / step;
 ```
-Step 1: Quantize input to INT16        →  input_int = round(input / in_scale)
-Step 2: Linear indexing                 →  base_idx = (input_int + 32768) // step
-                                           remainder = (input_int + 32768) % step
-Step 3: Find pivot real-world values    →  x_real = (base_idx * step - 32768) * in_scale
-                                           y_real = x_real + step * in_scale
-Step 4: Compute ideal activation        →  x_ideal = activation(x_real)
-                                           y_ideal = activation(y_real)
-Step 5: Quantize pivots to INT16        →  x_quant = round(x_ideal / out_scale)
-                                           y_quant = round(y_ideal / out_scale)
-Step 6: Fixed-point interpolation       →  output = x_quant + trunc(remainder * (y_quant - x_quant) / step)
-Step 7: Rescale to float                →  result = clamp(output) * out_scale
+
+**ALL arithmetic is pure integer**   C `int` division truncates toward zero. The emulator reproduces this exactly using `torch.int32` tensors.
+
+#### The Full Emulator Source
+
+```python
+class HardwareEmulator(torch.autograd.Function):
+    """
+    Bit-Exact Integer LUT Emulator   mirrors ESP-DL dl_module_lut.hpp exactly.
+    ALL arithmetic is pure integer (C int division truncates toward zero).
+    This emulator reproduces that exactly using torch.int32 tensors.
+    """
+    # Cache: maps (op_id) -> int16 table tensor
+    _table_cache = {}
+
+    @staticmethod
+    def _build_table(math_fn, op_context, in_scale, out_scale, step, rounding):
+        """
+        Build the INT16 LUT table exactly as the esp-ppq exporter does.
+        The table has (65536 // step + 1) entries   one per segment boundary.
+        """
+        n_entries = 65536 // step + 1  # 2049 for step=32
+
+        # Generate INT16 values at each table pivot
+        table_input_int = torch.arange(0, n_entries, dtype=torch.float32) * step - 32768
+
+        # Convert to real-world float values
+        s = in_scale.flatten()[0].item() if isinstance(in_scale, torch.Tensor) else float(in_scale)
+        table_input_float = table_input_int * s
+
+        # Compute the ideal activation output (uses the ORIGINAL math function)
+        table_output_float = math_fn(op_context, [table_input_float])
+
+        # Quantize to INT16 exactly as the exporter does
+        os = out_scale.flatten()[0].item() if isinstance(out_scale, torch.Tensor) else float(out_scale)
+        table_int16 = ppq_tensor_round(table_output_float / os, rounding)
+        table_int16 = torch.clamp(table_int16, -32768, 32767).to(torch.int32)
+
+        return table_int16.flatten()
+
+    @staticmethod
+    def forward(ctx, input_tensor, math_fn, op_context, in_scale, out_scale, step, rounding):
+        ctx.math_fn = math_fn
+        ctx.op_context = op_context
+        ctx.save_for_backward(input_tensor)
+
+        # --- Step 1: Quantize input to INT16 ---
+        in_scale_bc = in_scale.view(1, -1, 1, 1) if (isinstance(in_scale, torch.Tensor)
+                      and in_scale.ndim > 0 and input_tensor.ndim == 4) else in_scale
+        input_int = ppq_tensor_round(input_tensor / in_scale_bc, rounding)
+        input_int = torch.clamp(input_int, -32768, 32767).to(torch.int32)
+
+        # --- Step 2: Build or retrieve the LUT table (cached per operation) ---
+        cache_key = id(op_context)
+        if cache_key not in HardwareEmulator._table_cache:
+            HardwareEmulator._table_cache[cache_key] = HardwareEmulator._build_table(
+                math_fn, op_context, in_scale, out_scale, step, rounding
+            )
+        table = HardwareEmulator._table_cache[cache_key].to(input_int.device)
+
+        # --- Step 3: Pure integer LUT interpolation (mirrors C code exactly) ---
+        # C: int idx = input_ptr[i] + 32768;
+        idx = input_int + 32768                              # shift to [0, 65535]
+
+        # C: int len = idx % step;
+        remainder = idx % step
+
+        # C: idx = idx / step;  (C int division truncates toward zero)
+        base_idx = idx // step                               # same as C for non-negative
+        base_idx = torch.clamp(base_idx, 0, table.shape[0] - 2)
+
+        # C: int x = table_ptr[idx]; int y = table_ptr[idx + 1];
+        orig_shape = base_idx.shape
+        base_flat = base_idx.flatten().long()
+        x = table[base_flat].to(torch.int32)
+        y = table[base_flat + 1].to(torch.int32)
+
+        # C: output_ptr[i] = x + len * (y - x) / step;
+        # C-style integer division (truncate toward zero, not floor):
+        remainder_flat = remainder.flatten().to(torch.int32)
+        numerator = remainder_flat * (y - x)
+        interp = torch.where(
+            numerator >= 0,
+            numerator // step,           # non-negative: floor = truncate
+            -((-numerator) // step)      # negative: truncate toward zero
+        )
+
+        output_int = torch.clamp(x + interp, -32768, 32767).view(orig_shape)
+
+        # --- Step 4: Dequantize back to float for pipeline ---
+        out_scale_bc = out_scale.view(1, -1, 1, 1) if (isinstance(out_scale, torch.Tensor)
+                       and out_scale.ndim > 0 and input_tensor.ndim == 4) else out_scale
+        return output_int.float() * out_scale_bc
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """STE: gradient of the ideal (float) activation, not the quantized LUT."""
+        input_tensor, = ctx.saved_tensors
+        with torch.enable_grad():
+            x = input_tensor.detach().requires_grad_(True)
+            y = ctx.math_fn(ctx.op_context, [x])
+            grad = torch.autograd.grad(y.sum(), x)[0]
+        return grad_output * grad, None, None, None, None, None, None
 ```
 
-This emulator is **generalized**  it does not hardcode any specific activation function. Instead, it looks up the mathematical "truth" from `DEFAULT_BACKEND_TABLE[original_op_type]` at runtime, making it trivially extensible to any new activation function.
+#### Key Design Properties
 
-The backward pass uses a **Straight-Through Estimator (STE)**: it computes the gradient of the *ideal* (float) activation function, allowing QAT to optimize through the quantized LUT operation without the gradient being zero everywhere.
+1. **Pure integer arithmetic**   Steps 1-3 use `torch.int32` exclusively. No float operations during interpolation. This eliminates the cumulative float drift that plagued the earlier `HardwareEmulatorV0` (deprecated).
+
+2. **Table caching**   `_build_table()` runs once per operation and caches the result. During QAT training (hundreds of forward passes), the table is computed once and reused. This is critical for training performance.
+
+3. **C-style truncation**   Python's `//` operator floors (rounds toward -∞), but C's `/` truncates toward zero. For negative numerators, these give different results. The `torch.where()` branching handles this correctly:
+   ```python
+   # -7 // 4 = -2 in Python (floor)
+   # -7 / 4  = -1 in C      (truncate toward zero)
+   interp = torch.where(numerator >= 0, numerator // step, -((-numerator) // step))
+   ```
+
+4. **Activation-agnostic**   The emulator never hardcodes Swish, Sigmoid, or Tanh. The `math_fn` parameter is looked up at runtime from `DEFAULT_BACKEND_TABLE[op.attributes['original_op_type']]`. To add support for a new activation function:
+   - Register its forward function in `patches.py`
+   - Add its name to the `target_ops` list in `EspdlLUTFusionPass`
+   - That's it   the emulator, exporter, and verifier automatically support it
+
+5. **STE backward pass**   The gradient is computed from the *ideal* (float) activation function, not the quantized LUT. This allows QAT to optimize network weights even though the forward pass uses quantized integer math.
+
+#### The Dual-Mode Dispatcher
+
+The `lut_forward_provider()` function routes execution based on the global mode:
+
+```python
+def lut_forward_provider(op, values, ctx=None, **kwargs):
+    original_type = op.attributes['original_op_type']   # e.g., 'Swish'
+    ideal_math_fn = DEFAULT_BACKEND_TABLE[original_type]  # float function
+
+    if GlobalMode.get() == SimulationMode.IDEAL_MATH:
+        return ideal_math_fn(op, values)                  # → pure float math
+
+    # SIMULATION mode (default): bit-exact hardware emulation
+    return HardwareEmulator.apply(
+        values[0], ideal_math_fn, op,
+        op.input_quant_config[0].scale,
+        op.output_quant_config[0].scale,
+        op.attributes['int16_lut_step'],
+        op.input_quant_config[0].rounding
+    )
+```
 
 ### Phase 4: Context-Aware Export
 
 The `HardwareAwareEspdlExporter` solves a subtle but critical problem:
 
-- **During table generation**: The exporter's `AddLUTPattern` calls the operation's forward function to compute LUT pivot values. This **must** use Ideal Math (floating-point activation)  not the hardware emulator  because the table entries *are* the truth that the emulator will interpolate from.
+- **During table generation**: The exporter's `AddLUTPattern` calls the operation's forward function to compute LUT pivot values. This **must** use Ideal Math (floating-point activation)   because the table entries *are* the truth that the emulator interpolates from.
 - **During all other phases** (simulation, verification, training): The forward function **must** use the hardware emulator to predict actual on-chip behavior.
 
 The exporter automatically switches modes:
@@ -251,36 +398,83 @@ class HardwareAwareEspdlExporter(EspdlExporter):
             GlobalMode.set(SimulationMode.SIMULATION)  # Everything else gets HW sim
 ```
 
-### Phase 5: Verification  Python vs Hardware
+---
 
-Verification happens at three levels:
+## API Usage Guide
 
-#### Level 1: LUT Pivot Parity (Table-Level)
-During the fusion pass, the library generates the LUT table in both modes and compares every single pivot value:
-- **Math Table**: `activation(pivot) → quantize → INT16 value`
-- **Simulation Table**: `HardwareEmulator(pivot) → quantize → INT16 value`
-
-If these 2,048 pivot values match exactly, the table is correct.
-
-#### Level 2: Exhaustive Sweep (Full INT16 Range)
-The `run_deep_verification()` function tests every single INT16 input value (-32,768 to +32,767), plus out-of-bound stress values:
+### Quick Integration (3 Steps)
 
 ```python
+import esp_ppq_lut as esp_lut
+import esp_ppq.lib as PFL
+
+# 1. Initialize (once, before any quantization)
+esp_lut.initialize(step=32, verbose=True)
+
+# 2. After calibration, apply LUT fusion
+lut_pass = esp_lut.EspdlLUTFusionPass(
+    target_ops=['Swish'],       # or ['Swish', 'Sigmoid', 'Tanh']
+    lut_step=32
+)
+lut_pass.optimize(graph=graph, dataloader=cali_loader, executor=executor,
+                  calib_steps=0, collate_fn=lambda x: x.to(device))
+
+# 3. Export (mode switching is automatic)
+exporter = PFL.Exporter(platform=TARGET_PLATFORM)
+exporter.export("model_s8.espdl", graph=graph, int16_lut_step=32)
+```
+
+### Full Pipeline with Mode Control
+
+```python
+import esp_ppq_lut as esp_lut
+from esp_ppq_lut import set_simulation_mode, SimulationMode
+
+# Initialize
+esp_lut.initialize(step=32, verbose=True)
+
+# ... quantization + calibration pipeline ...
+
+# Apply LUT fusion (after calibration   scales must be computed first)
+esp_lut.EspdlLUTFusionPass(
+    target_ops=['Swish'], lut_step=32
+).optimize(
+    graph=graph, dataloader=cali_loader, executor=executor,
+    calib_steps=0, collate_fn=lambda x: x.to(device)
+)
+
+# Manual mode control for dual-mode testing
+set_simulation_mode(SimulationMode.SIMULATION)     # → HW-exact LUT interpolation
+outputs_sim = executor.forward(test_input)
+
+set_simulation_mode(SimulationMode.IDEAL_MATH)      # → pure float activation
+outputs_ideal = executor.forward(test_input)
+
+set_simulation_mode(SimulationMode.SIMULATION)      # restore default
+
+# Deep verification (for isolated single-activation models)
 esp_lut.run_deep_verification(
-    graph=graph,
-    executor=executor,
+    graph=graph, executor=executor,
     dataloader=[calibration_data],
-    output_dir="outputs"
+    output_dir="outputs", verbose=True
+)
+
+# Export (auto-switches to IDEAL for table gen, reverts to SIM after)
+PFL.Exporter(platform=TARGET_PLATFORM).export(
+    "model.espdl", graph=graph, int16_lut_step=32
 )
 ```
 
-This generates:
-- **Sweep plots**  Visual comparison of Hardware Simulation vs Ideal Math across the full input range
-- **C headers**  `test_data.h` files containing the input/expected-output arrays for firmware validation
-- **JSON manifests**  Machine-readable verification metadata (`mapping.json`)
+### API Reference
 
-#### Level 3: On-Device Firmware Validation
-A C++ ESP-IDF application (in `tests_3_layers/firmware/`) loads the exported `.espdl` models on real ESP32 hardware, feeds the exact same test vectors, and compares outputs bit-by-bit against the Python predictions.
+| API | Purpose | When to Call |
+|-----|---------|-------------|
+| `esp_lut.initialize(step, verbose)` | Register all handlers and exporters | Once, before quantization |
+| `EspdlLUTFusionPass(target_ops, lut_step)` | Rewrite graph: activation → LUT | After calibration, before export |
+| `set_simulation_mode(SimulationMode.SIMULATION)` | Bit-exact hardware emulation mode | Default   for validation and QAT |
+| `set_simulation_mode(SimulationMode.IDEAL_MATH)` | Pure float activation mode | Only for manual table generation |
+| `run_deep_verification(graph, executor, ...)` | Exhaustive 65,536-point sweep test | For isolated activation testing |
+| `PFL.Exporter(...).export(path, int16_lut_step=32)` | Export `.espdl` binary | After LUT fusion |
 
 ---
 
@@ -302,9 +496,9 @@ output = pivot[base_idx] + trunc( remainder × (pivot[base_idx+1] - pivot[base_i
 ```
 
 Key details:
-- **Integer truncation** (`trunc`, not `round`) is used for the interpolation  this is a source of systematic quantization error that must be replicated exactly in simulation
+- **Integer truncation** (`trunc`, not `round`) is used for the interpolation   this is a source of systematic quantization error that must be replicated exactly in simulation
 - **Rounding-to-nearest-even (RNE)** is used for the initial input quantization and pivot value quantization
-- **Table size**: With `step=32`, the table contains 2,049 INT16 values = **4,098 bytes (~4KB)** per activation layer  small enough for the MCU cache
+- **Table size**: With `step=32`, the table contains 2,049 INT16 values = **4,098 bytes (~4KB)** per activation layer   small enough for the MCU cache
 
 ### The 2049-Point Table (Fencepost Fix)
 
@@ -312,20 +506,18 @@ A common source of bugs in LUT implementations is the **fencepost error**. With 
 
 **The Fence Analogy:**
 ```
-✅ Correct (2049 points  what the MCU expects):
+✅ Correct (2049 points   what the MCU expects):
 
 Post Indices:    0     1     2     ...     2047    2048
                  |*****|*****|*****  ...  *|*****|
 Segments:           1     2     3   ...   2047   2048
 
-❌ Bug (2048 points  what esp-ppq originally generated):
+❌ Bug (2048 points   what esp-ppq originally generated):
 
 Post Indices:    0     1     2     ...     2047
                  |*****|*****|*****  ...  *|***** → [OUT OF BOUNDS READ]
 Segments:           1     2     3   ...   2047     2048 ← no end boundary!
 ```
-
-The original `esp-ppq` library used `torch.arange(min, max + 1, step)` which generates 2,048 points. This library corrects it to `torch.arange(min, max + step, step)` which generates the correct 2,049 points.
 
 You can verify this in the exported `.espdl` model info:
 ```
@@ -337,8 +529,8 @@ You can verify this in the exported `.espdl` model info:
 The library maintains a global execution mode via `GlobalMode`:
 
 | Mode | When Used | Math Used | Purpose |
-|------|-----------|-----------|---------|
-| `SIMULATION` | Default  Validation, PTQ, QAT/STE | Fixed-point LUT interpolation | Predict exact hardware output |
+|------|-----------|-----------| --------|
+| `SIMULATION` | Default   Validation, PTQ, QAT/STE | Fixed-point LUT interpolation (INT32) | Predict exact hardware output |
 | `IDEAL_MATH` | During `.espdl` export only | Floating-point activation | Generate correct table values |
 
 This is managed automatically by the `HardwareAwareEspdlExporter`, but can also be controlled manually:
@@ -365,106 +557,306 @@ Adding a new activation function requires only:
 1. Register its forward function in `patches.py`
 2. Add its name to the `target_ops` list in `EspdlLUTFusionPass`
 
+The emulator, exporter, and verifier automatically support it   no code changes required outside these two lines.
+
 ---
 
-## Verification Results
+## YOLO26n End-to-End Deployment
 
-### ESP32-P4
+The `test_yolo/yolo_test.py` script is a comprehensive single-file pipeline that takes YOLO26n from a `.pt` checkpoint all the way to a validated firmware binary. This section documents the key engineering decisions and the scientific validation methodology.
 
-**Sigmoid  Pivot Parity Check (2,048 pivot values, Simulation vs Ideal Math):**
+### Engineering Decisions & Design Rationale
 
-<p align="center">
-  <img src="tests_3_layers/outputs/p4/sigmoid_test/lut_verification/lut_1_parity.png" alt="Sigmoid Pivot Parity  ESP32-P4" width="80%">
-</p>
+#### 1. Custom Preprocessing   Pixel-Exact `resize_nn` Clone
 
-**Sigmoid  Exhaustive INT16 Sweep (65,536+ points, Hardware Sim vs Ideal F32):**
+**Problem**: Python's `cv2.resize()` defaults to bilinear interpolation. ESP-DL's C++ `ImagePreprocessor` uses **nearest-neighbor** with a specific integer-math resize formula. Even sub-pixel differences in a single input value propagate through the quantized model and invalidate all output comparisons.
 
-<p align="center">
-  <img src="tests_3_layers/outputs/p4/sigmoid_test/lut_verification/lut_1_sweep.png" alt="Sigmoid Exhaustive Sweep  ESP32-P4" width="80%">
-</p>
+**Solution**: `espdl_preprocess()` clones ESP-DL's C++ `resize_nn` pixel-by-pixel, using identical integer truncation (`int()`) and letterbox padding:
 
-**Swish  Pivot Parity Check:**
-
-<p align="center">
-  <img src="tests_3_layers/outputs/p4/swish_test/lut_verification/lut_1_parity.png" alt="Swish Pivot Parity  ESP32-P4" width="80%">
-</p>
-
-**Swish  Exhaustive INT16 Sweep:**
-
-<p align="center">
-  <img src="tests_3_layers/outputs/p4/swish_test/lut_verification/lut_1_sweep.png" alt="Swish Exhaustive Sweep  ESP32-P4" width="80%">
-</p>
-
-**Tanh  Pivot Parity Check:**
-
-<p align="center">
-  <img src="tests_3_layers/outputs/p4/tanh_test/lut_verification/lut_1_parity.png" alt="Tanh Pivot Parity  ESP32-P4" width="80%">
-</p>
-
-**Tanh  Exhaustive INT16 Sweep:**
-
-<p align="center">
-  <img src="tests_3_layers/outputs/p4/tanh_test/lut_verification/lut_1_sweep.png" alt="Tanh Exhaustive Sweep  ESP32-P4" width="80%">
-</p>
-
-### ESP32-S3
-
-**Sigmoid  Pivot Parity & Exhaustive Sweep:**
-
-<p align="center">
-  <img src="tests_3_layers/outputs/s3/sigmoid_test/lut_verification/lut_1_parity.png" alt="Sigmoid Pivot Parity  ESP32-S3" width="49%">
-  <img src="tests_3_layers/outputs/s3/sigmoid_test/lut_verification/lut_1_sweep.png" alt="Sigmoid Sweep  ESP32-S3" width="49%">
-</p>
-
-**Swish  Pivot Parity & Exhaustive Sweep:**
-
-<p align="center">
-  <img src="tests_3_layers/outputs/s3/swish_test/lut_verification/lut_1_parity.png" alt="Swish Pivot Parity  ESP32-S3" width="49%">
-  <img src="tests_3_layers/outputs/s3/swish_test/lut_verification/lut_1_sweep.png" alt="Swish Sweep  ESP32-S3" width="49%">
-</p>
-
-**Tanh  Pivot Parity & Exhaustive Sweep:**
-
-<p align="center">
-  <img src="tests_3_layers/outputs/s3/tanh_test/lut_verification/lut_1_parity.png" alt="Tanh Pivot Parity  ESP32-S3" width="49%">
-  <img src="tests_3_layers/outputs/s3/tanh_test/lut_verification/lut_1_sweep.png" alt="Tanh Sweep  ESP32-S3" width="49%">
-</p>
-
-### Firmware Validation Logs
-
-Real hardware test results confirming 100% bit-exact match between Python simulation and ESP-DL execution:
-
-**ESP32-S3:**
-```
-I (922) LUT_VALIDATION: ==========================================================
-I (932) LUT_VALIDATION:    Starting Multi-Layer LUT Validation Loop
-I (942) LUT_VALIDATION:    TARGET: ESP32-S3
-I (942) LUT_VALIDATION: ==========================================================
-I (962) LUT_VALIDATION: Testing Layer: Swish
-I (1072) LUT_VALIDATION:   ✅ SUCCESS: Swish matches 100% (Bit-Exact)
-I (1072) LUT_VALIDATION: Testing Layer: Sigmoid
-I (1182) LUT_VALIDATION:   ✅ SUCCESS: Sigmoid matches 100% (Bit-Exact)
-I (1192) LUT_VALIDATION: Testing Layer: Tanh
-I (1302) LUT_VALIDATION:   ✅ SUCCESS: Tanh matches 100% (Bit-Exact)
-I (1302) LUT_VALIDATION: Validation Suite Finished.
+```python
+def espdl_preprocess(img_bgr, dst_shape, pad_val=114):
+    src_h, src_w = img_bgr.shape[:2]
+    dst_h, dst_w = dst_shape
+    scale = min(dst_w / float(src_w), dst_h / float(src_h))
+    # ... letterbox padding calculation ...
+    inv_scale_x = float(src_w) / act_dst_w
+    inv_scale_y = float(src_h) / act_dst_h
+    for y_dst in range(act_dst_h):
+        y_src = min(int(y_dst * inv_scale_y), src_h - 1)
+        for x_dst in range(act_dst_w):
+            x_src = min(int(x_dst * inv_scale_x), src_w - 1)
+            out_img[y_dst + border_top, x_dst + border_left] = img_bgr[y_src, x_src]
+    return out_img
 ```
 
-**ESP32-P4:**
-```
-I (1483) LUT_VALIDATION: ==========================================================
-I (1493) LUT_VALIDATION:    Starting Multi-Layer LUT Validation Loop
-I (1503) LUT_VALIDATION:    TARGET: ESP32-P4
-I (1503) LUT_VALIDATION: ==========================================================
-I (1523) LUT_VALIDATION: Testing Layer: Swish
-I (1573) LUT_VALIDATION:   ✅ SUCCESS: Swish matches 100% (Bit-Exact)
-I (1573) LUT_VALIDATION: Testing Layer: Sigmoid
-I (1623) LUT_VALIDATION:   ✅ SUCCESS: Sigmoid matches 100% (Bit-Exact)
-I (1623) LUT_VALIDATION: Testing Layer: Tanh
-I (1673) LUT_VALIDATION:   ✅ SUCCESS: Tanh matches 100% (Bit-Exact)
-I (1683) LUT_VALIDATION: Validation Suite Finished.
+**Proof**: TEST 0 → 786,432 values, **0 errors**.
+
+#### 2. Raw RGB Bypass   No JPEG Decoder
+
+**Problem**: ESP32-P4's hardware JPEG decoder produces slightly different pixel values than Python's `cv2.imread()` for the same JPEG file. Even 1-bit pixel differences propagate through the quantized model.
+
+**Solution**: Export the **raw uncompressed RGB pixels** as a C header (`raw_rgb_person.h`). The firmware feeds this directly to `ImagePreprocessor`, bypassing the JPEG decoder entirely:
+
+```c
+// Firmware: bypass JPEG, feed raw pixels
+dl::image::img_t img;
+img.data = (uint8_t*)test_data::raw_rgb_person;
+img.width = 500;
+img.height = 375;
+img.pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB888;
+processor.preprocess(img);
 ```
 
-> **Result: 6/6 tests pass  100% bit-exact match across all 3 activation functions on both ESP32-P4 and ESP32-S3.**
+**Rationale**: The goal is model validation, not JPEG decoder parity. By removing JPEG from the equation, we isolate the variable we actually care about.
+
+#### 3. NHWC Layout Conversion
+
+**Problem**: PyTorch uses NCHW layout. ESP-DL uses **NHWC** internally. Test vectors must match the firmware's memory layout.
+
+**Solution**: All test data (input + outputs) are transposed before writing to C headers:
+
+```python
+# Transpose NCHW → NHWC for ESP-DL layout
+sim_nhwc = tensor.permute(0, 2, 3, 1).contiguous()
+```
+
+#### 4. Graph Surgery   Aux Head Removal + Concat Splitting
+
+**Problem**: YOLO26n exports with 6 outputs: 3 aux (training-only) + 3 main (one2one). Each main output is a `Concat` of box (4ch) + cls (80ch). ESP-DL needs them as separate tensors for post-processing.
+
+**Solution**: Three-step graph surgery after QAT:
+1. Remove aux head outputs and prune all disconnected ops
+2. Split each Concat into its box and cls inputs → 6 separate output tensors
+3. Re-register outputs in strict order: `[p3_box, p3_cls, p4_box, p4_cls, p5_box, p5_cls]`
+
+**Why after quantization?**: The Concat is fused during calibration. Splitting it post-quantization preserves the calibrated scales on each branch.
+
+#### 5. AddLUTPattern Step Size Override
+
+**Problem**: The stock `esp-ppq` exporter's `AddLUTPattern` sometimes defaults to `step=256` (producing a 257-entry table) even when `int16_lut_step=32` is passed.
+
+**Solution**: Monkey-patch `AddLUTPattern.export()` in the test script to prioritize the operation's `int16_lut_step` attribute (set by the fusion pass):
+
+```python
+current_step = op.attributes.get("int16_lut_step", self.int16_step)
+```
+
+**Why in the test script, not the library?**: To avoid side-effects in the library package   the patch is deployment-specific and may conflict with other export flows.
+
+#### 6. Two-Phase Calibration
+
+**Problem**: The LUT fusion pass needs **calibrated scales** to build its LUT table. If placed inside the calibration pipeline, scales aren't ready yet.
+
+**Solution**: Separate the pipeline:
+- **Phase 1**: Standard calibration passes (QuantizeSimplify → QuantizeFusion → Calibration → Alignment)   computes all scales
+- **Phase 2**: LUT fusion with `calib_steps=0`   uses the already-computed scales to build LUT tables
+
+#### 7. Mixed-Precision Layer Selection
+
+**Problem**: Full INT8 destroys YOLO26n's box regression accuracy. Full INT16 is too slow (naive float fallback).
+
+**Solution**: **30 layers** explicitly promoted to INT16   specifically the **box head** and **class head** Conv+Swish pairs across all 3 scales (P3/P4/P5). The shared backbone stays INT8 for speed. Final 1×1 projections stay INT8.
+
+**Why these layers?**: YOLO26n's one2one head uses RegMax=1 direct regression   there's no DFL (Distribution Focal Loss) to absorb quantization noise. Every bit of precision in the head's intermediate activations matters.
+
+#### 8. Dual-Model Export
+
+**Problem**: Without a baseline, you can't distinguish "LUT interpolation error" from "quantization error".
+
+**Solution**: Export **two** `.espdl` models from the **same calibrated graph**:
+- **Model A (LUT)**: Swish replaced by LUT tables → fast hardware path
+- **Model B (IDEAL)**: Standard Swish op → slow but reference-accurate
+
+The firmware loads both and runs the 4-test protocol to scientifically prove LUT correctness.
+
+#### 9. INT8/INT16 Output Type Detection
+
+**Problem**: The firmware must use the correct comparison function (INT8 vs INT16) and clamp range for each output tensor.
+
+**Solution**: Detect bit width via the tensor's `exponent` field:
+```c
+if (tensor->exponent < -7) {
+    // INT16   exponent < -7 means scale < 2^-7 = 0.0078, only possible for INT16
+    compare_output_int16((int16_t *)tensor->data, ...);
+} else {
+    compare_output_int8((int8_t *)tensor->data, ...);
+}
+```
+
+#### 10. FP32 Concat Nodes
+
+**Problem**: The 3 Concat nodes that merge box+cls in the detection head cause quantization errors when set to INT8.
+
+**Solution**: Force these specific nodes to FP32: `"/model.23/Concat_3"`, `"/model.23/Concat_4"`, `"/model.23/Concat_5"`.
+
+---
+
+### The 4-Test Firmware Validation Protocol
+
+The firmware executes 4 sequential tests on real ESP32-P4 hardware. Each test isolates one variable to prove a specific property. All 4 must pass for the deployment to be considered validated.
+
+#### TEST 0: Preprocessing Parity
+
+| Property | Value |
+|----------|-------|
+| **Command** | `HW(LUT Preprocess) vs Python(test_input)` |
+| **What it tests** | Input preprocessing pipeline parity |
+| **Why it matters** | If the input to the model differs between Python and firmware, ALL output comparisons are meaningless   mismatches could be caused by input differences, not model differences |
+| **How it works** | Python's `espdl_preprocess()` clones ESP-DL's C++ `resize_nn` + letterbox padding pixel-by-pixel. The firmware feeds raw RGB through ESP-DL's native `ImagePreprocessor`, then compares the resulting INT8 input tensor element-by-element |
+| **Tolerance** | ±1 (rounding differences in integer quantization of pixel values) |
+| **Result** | **✅ PASS   786,432 values, 0 errors (pixel-exact)** |
+
+> This zero-error result proves the Python preprocessing is a pixel-exact clone of the C++ pipeline.
+
+#### TEST 1: LUT Simulation Accuracy   The Core Claim
+
+| Property | Value |
+|----------|-------|
+| **Command** | `HW(LUT model) vs SIMULATION` |
+| **What it tests** | Whether `esp_ppq_lut`'s Python integer emulator predicts the actual hardware LUT output |
+| **Why it matters** | This is the **central claim of the library**   that the Python simulation is a "Digital Twin" of the ESP-DL hardware. If this test fails, the library's predictions are unreliable |
+| **How it works** | Both sides run the same LUT model (Swish replaced by 4KB LUT tables with step=32 interpolation). Python uses `HardwareEmulator` (integer-domain). Hardware uses ESP-DL's `dl_module_lut.hpp` |
+| **Tolerance** | ±1 LSB (from intermediate INT8 rounding in shared backbone; not from LUT emulation itself) |
+
+**Per-output results:**
+
+| Output | Total Values | Mismatches | Rate | Max Error | Status |
+|--------|-------------|------------|------|-----------|--------|
+| `one2one_p3_box` | 16,384 | 0 | 0% | 0 | ✅ Bit-Exact |
+| `one2one_p3_cls` | 327,680 | 11,880 | 3.6% | ±1 | ✅ Pass ±1 |
+| `one2one_p4_box` | 4,096 | 14 | 0.3% | ±1 | ✅ Pass ±1 |
+| `one2one_p4_cls` | 81,920 | 1,736 | 2.1% | ±1 | ✅ Pass ±1 |
+| `one2one_p5_box` | 1,024 | 3 | 0.3% | ±1 | ✅ Pass ±1 |
+| `one2one_p5_cls` | 20,480 | 861 | 4.2% | ±1 | ✅ Pass ±1 |
+| **TOTAL** | **451,584** | **14,494** | **3.2%** | **±1** | **✅ PASS** |
+
+> **Analysis**: All errors are exactly ±1 LSB   no single element exceeds tolerance. The ±1 mismatches originate from intermediate INT8 rounding in the shared Conv backbone (before the INT16 head), not from the LUT emulation itself. This is standard for mixed-precision quantized inference and is expected in TEST 3 as well (see below).
+
+#### TEST 2: LUT vs Float Divergence   The Control Test
+
+| Property | Value |
+|----------|-------|
+| **Command** | `HW(LUT model) vs IDEAL_MATH` |
+| **What it tests** | Whether the LUT interpolation produces different results than float math |
+| **Why it matters** | If this showed 0 mismatches, the LUT would be identical to float   making the library unnecessary. The mismatches here **prove the simulation gap exists** and justify the library |
+| **How it works** | Same hardware LUT output as TEST 1, but compared against Python's `IDEAL_MATH` mode (float32 Swish, no truncation, no interpolation) |
+
+**Result:**
+
+| Output | Total Values | Mismatches | Rate |
+|--------|-------------|------------|------|
+| `one2one_p3_box` | 16,384 | 82 | 0.5% |
+| `one2one_p3_cls` | 327,680 | 13,707 | 4.2% |
+| `one2one_p4_box` | 4,096 | 28 | 0.7% |
+| `one2one_p4_cls` | 81,920 | 3,614 | 4.4% |
+| `one2one_p5_box` | 1,024 | 11 | 1.1% |
+| `one2one_p5_cls` | 20,480 | 2,194 | 10.7% |
+| **TOTAL** | **451,584** | **19,636** | **4.3%** |
+
+> **Analysis**: 4.3% of output values differ between LUT and float   confirming the simulation gap. The mismatch count (19,636) is **higher** than TEST 1 (14,494), proving that `SIMULATION` mode is closer to hardware than `IDEAL_MATH`. The `cls` outputs show higher divergence because classification logits are more sensitive to activation precision. This is the exact problem `esp_ppq_lut` solves.
+
+#### TEST 3: Baseline Correctness   Sanity Check
+
+| Property | Value |
+|----------|-------|
+| **Command** | `HW(IDEAL model) vs IDEAL_MATH` |
+| **What it tests** | Whether the standard (non-LUT) model works correctly on hardware |
+| **Why it matters** | Eliminates the possibility that mismatches in TEST 1/2 are caused by broken test infrastructure. If this fails, the test harness itself is broken |
+| **How it works** | Loads a second `.espdl` model where Swish is kept as a standard op (no LUT). ESP-DL falls through to its naive `dequant → float32 Swish → requant` path. Compared against `IDEAL_MATH` vectors |
+| **Tolerance** | ±1 LSB |
+
+**Per-output results:**
+
+| Output | Total Values | Mismatches | Rate | Max Error | Status |
+|--------|-------------|------------|------|-----------|--------|
+| `one2one_p3_box` | 16,384 | 0 | 0% | 0 | ✅ Bit-Exact |
+| `one2one_p3_cls` | 327,680 | 11,934 | 3.6% | ±1 | ✅ Pass ±1 |
+| `one2one_p4_box` | 4,096 | 14 | 0.3% | ±1 | ✅ Pass ±1 |
+| `one2one_p4_cls` | 81,920 | 1,697 | 2.1% | ±1 | ✅ Pass ±1 |
+| `one2one_p5_box` | 1,024 | 1 | 0.1% | ±1 | ✅ Pass ±1 |
+| `one2one_p5_cls` | 20,480 | 650 | 3.2% | ±1 | ✅ Pass ±1 |
+| **TOTAL** | **451,584** | **14,296** | **3.2%** | **±1** | **✅ PASS** |
+
+> **Analysis**: The IDEAL model passes with nearly identical ±1 statistics as TEST 1 (14,296 vs 14,494). This confirms: (1) the test infrastructure is correct, (2) the ±1 mismatches originate from the **shared INT8 backbone**, not the activation function, and (3) the LUT model performs **at parity** with the reference float Swish model.
+
+---
+
+### Verification Results   ESP32-P4
+
+#### Cross-Test Summary
+
+| Test | Model | Reference | Total Values | Mismatches | Max Error | Status |
+|------|-------|-----------|-------------|------------|-----------|--------|
+| **TEST 0** |   | Preprocessing | 786,432 | 0 | 0 | ✅ Pixel-Exact |
+| **TEST 1** | LUT | SIMULATION | 451,584 | 14,494 (3.2%) | ±1 | ✅ Pass |
+| **TEST 2** | LUT | IDEAL_MATH | 451,584 | 19,636 (4.3%) | ±1 | ⚠️ Expected Divergence |
+| **TEST 3** | IDEAL | IDEAL_MATH | 451,584 | 14,296 (3.2%) | ±1 | ✅ Baseline Pass |
+
+<p align="center">
+  <img src="assets/netron_lut_layers.png" width="600"><br>
+  <b>Figure 3</b>: Netron visualization of the exported <code>.espdl</code> model showing LUT nodes replacing Swish activations in the detection head.
+</p>
+
+#### Full Firmware Log
+
+```
+I (2969) YOLO26_VAL: ==========================================================
+I (2979) YOLO26_VAL:    YOLO26n PTQ Triple-Mode Validation
+I (2989) YOLO26_VAL:    IMG_SZ: 512, LUT_STEP: 32
+I (2989) YOLO26_VAL:    TARGET: ESP32-P4
+I (2989) YOLO26_VAL: ==========================================================
+
+I (3009) YOLO26_VAL: Loading LUT Model (Model A)...
+I (3399) YOLO26_VAL: [LUT] Input size: 786432, scale: 0.00781250
+
+I (3409) YOLO26_VAL: TEST 0: HW(LUT Preprocess) vs Python(test_input)   expect match (+/-1 tol)
+I (3539) YOLO26_VAL:   input_tensor: PASS (786432 values, err: 0)
+
+I (3539) YOLO26_VAL: [LUT] Running inference...
+
+I (5529) YOLO26_VAL: TEST 1: HW(LUT model) vs SIMULATION   expect match (+/-1 tol)
+I (5539) YOLO26_VAL:   one2one_p3_box: PASS (16384 values, err: 0)
+I (5609) YOLO26_VAL:   one2one_p3_cls: PASS +/-1 (11880/327680 mismatches, err_range:[-1,1])
+I (5619) YOLO26_VAL:   one2one_p4_box: PASS +/-1 (14/4096 mismatches, err_range:[-1,1])
+I (5649) YOLO26_VAL:   one2one_p4_cls: PASS +/-1 (1736/81920 mismatches, err_range:[-1,1])
+I (5669) YOLO26_VAL:   one2one_p5_box: PASS +/-1 (3/1024 mismatches, err_range:[-1,1])
+I (5689) YOLO26_VAL:   one2one_p5_cls: PASS +/-1 (861/20480 mismatches, err_range:[-1,1])
+I (5699) YOLO26_VAL:   TOTAL PASS within +/-1: 14494/451584 mismatches (err_range:[-1,1], 6 outputs)
+
+I (5719) YOLO26_VAL: TEST 2: HW(LUT model) vs IDEAL_MATH   expect mismatches
+I (5739) YOLO26_VAL:   one2one_p3_box: 82/16384 mismatches (err_range:[-1,1])
+I (5809) YOLO26_VAL:   one2one_p3_cls: 13707/327680 mismatches (err_range:[-1,1])
+I (5819) YOLO26_VAL:   one2one_p4_box: 28/4096 mismatches (err_range:[-1,1])
+I (5859) YOLO26_VAL:   one2one_p4_cls: 3614/81920 mismatches (err_range:[-1,1])
+I (5869) YOLO26_VAL:   one2one_p5_box: 11/1024 mismatches (err_range:[-1,1])
+I (5899) YOLO26_VAL:   one2one_p5_cls: 2194/20480 mismatches (err_range:[-1,1])
+I (5899) YOLO26_VAL:   TOTAL: 19636 mismatches (err_range:[-1,1])
+
+I (5959) YOLO26_VAL: Loading IDEAL Model (Model B)...
+I (6449) YOLO26_VAL: [IDEAL] Running inference...
+
+I (12179) YOLO26_VAL: TEST 3: HW(IDEAL model) vs IDEAL_MATH   expect match (+/-1 tol)
+I (12189) YOLO26_VAL:   one2one_p3_box: PASS (16384 values, err: 0)
+I (12259) YOLO26_VAL:   one2one_p3_cls: PASS +/-1 (11934/327680 mismatches, err_range:[-1,1])
+I (12269) YOLO26_VAL:   one2one_p4_box: PASS +/-1 (14/4096 mismatches, err_range:[-1,1])
+I (12309) YOLO26_VAL:   one2one_p4_cls: PASS +/-1 (1697/81920 mismatches, err_range:[-1,1])
+I (12309) YOLO26_VAL:   one2one_p5_box: PASS +/-1 (1/1024 mismatches, err_range:[0,1])
+I (12339) YOLO26_VAL:   one2one_p5_cls: PASS +/-1 (650/20480 mismatches, err_range:[-1,1])
+I (12339) YOLO26_VAL:   TOTAL PASS within +/-1: 14296/451584 mismatches (err_range:[-1,1], 6 outputs)
+
+I (12359) YOLO26_VAL: Validation Finished.
+```
+
+### Detection Results
+
+The LUT model produces correct object detection results on `person.jpg`:
+
+```
+YOLO26: [category: person,  score: 0.92, x1: 328, y1: 172, x2: 404, y2: 380]
+YOLO26: [category: bicycle, score: 0.88, x1: 188, y1: 308, x2: 388, y2: 412]
+YOLO26: [category: truck,   score: 0.62, x1: 108, y1: 132, x2: 204, y2: 284]
+YOLO26: [category: bicycle, score: 0.27, x1: 122, y1: 134, x2: 192, y2: 182]
+```
 
 ---
 
@@ -473,46 +865,40 @@ I (1683) LUT_VALIDATION: Validation Suite Finished.
 ```
 esp_ppq_lut/
 │
-├── src/                              # Main Library & Entry Point
-│   ├── esp_ppq_lut/                  # The Extension Package
-│   │   ├── __init__.py               # Entry point: initialize()
-│   │   ├── emulator.py               # Bit-exact HardwareEmulator (torch.autograd.Function)
-│   │   ├── exporter.py               # HardwareAwareEspdlExporter (dual-mode context mgmt)
-│   │   ├── passes.py                 # EspdlLUTFusionPass (graph rewriting + self-audit)
-│   │   ├── patches.py                # Backend table patches (Sigmoid, Tanh, Relu forwarders)
-│   │   ├── utils.py                  # LUT table generation, plots, C headers, manifests
-│   │   └── verifier.py               # Exhaustive 65K-point deep verification
-│   ├── main.py                       # Single-activation deployment example (Swish)
-│   └── outputs/                      # Generated artifacts (ONNX, .espdl, plots, .info)
+├── src/                                  # Core Library
+│   └── esp_ppq_lut/                      # The Extension Package
+│       ├── __init__.py                   # Entry point: initialize()
+│       ├── emulator.py                   # Bit-exact HardwareEmulator (INT32 LUT + table cache)
+│       ├── exporter.py                   # HardwareAwareEspdlExporter (dual-mode context mgmt)
+│       ├── passes.py                     # EspdlLUTFusionPass (graph rewriting: activation → LUT)
+│       ├── patches.py                    # Backend table patches (Sigmoid, Tanh, Relu forwarders)
+│       ├── utils.py                      # LUT table generation, plots, C headers, manifests
+│       └── verifier.py                   # Exhaustive 65K-point deep verification
 │
-├── tests_3_layers/                   # Multi-Activation Validation Suite
-│   ├── common.py                     # Shared test infrastructure & model definitions
-│   ├── run_all.py                    # Test runner (executes all 3 tests sequentially)
-│   ├── test_swish.py                 # Swish validation test
-│   ├── test_sigmoid.py               # Sigmoid validation test
-│   ├── test_tanh.py                  # Tanh validation test
-│   ├── outputs/                      # Generated verification plots & artifacts
-│   │   ├── p4/                       # ESP32-P4 target outputs
-│   │   │   ├── swish_test/
-│   │   │   ├── sigmoid_test/
-│   │   │   └── tanh_test/
-│   │   └── s3/                       # ESP32-S3 target outputs
-│   │       ├── swish_test/
-│   │       ├── sigmoid_test/
-│   │       └── tanh_test/
-│   └── firmware/                     # ESP-IDF Firmware Validation App
-│       ├── CMakeLists.txt
-│       ├── main/
-│       │   ├── main.cpp              # C++ validation loop (loads .espdl, compares outputs)
-│       │   ├── models/               # Target-specific .espdl model binaries
-│       │   └── test_data/            # Generated C headers with golden vectors
-│       ├── sdkconfig.defaults.esp32p4
-│       ├── sdkconfig.defaults.esp32s3
-│       ├── partitions.csv
-│       └── firmware_tests_results.txt
+├── test_yolo/                            # YOLO26n End-to-End Validation Pipeline
+│   ├── yolo_test.py                      # Full pipeline: ONNX → PTQ → QAT → LUT → export → firmware
+│   ├── yolo26n.pt                        # Model checkpoint
+│   ├── scripts/                          # QAT helpers
+│   │   ├── trainer.py                    # QATTrainer: epoch/eval/save/load
+│   │   ├── dataset.py                    # Calibration & training data loaders
+│   │   ├── export.py                     # ONNX export patches for YOLO26n
+│   │   ├── utils.py                      # Seeding, graph utilities, loss patches
+│   │   └── esp_ppq_patch.py              # esp-ppq compatibility patches
+│   ├── firmware/                         # Generated ESP-IDF Validation Project
+│   │   ├── CMakeLists.txt
+│   │   ├── main/
+│   │   │   ├── main.cpp                  # Triple-mode validation (TEST 0/1/2/3)
+│   │   │   ├── models/                   # .espdl binaries (LUT + IDEAL)
+│   │   │   └── test_data/                # Generated C headers (test vectors + raw RGB)
+│   │   ├── sdkconfig.defaults.esp32p4
+│   │   └── partitions.csv
+│   ├── images/                           # Test images (person.jpg, etc.)
+│   └── output/                           # Generated artifacts (.espdl, .onnx, .info)
 │
-└── prototypes/                       # Original Research Prototype
-    └── validate_lut.py               # Monolithic proof-of-concept (Swish-only, monkey-patching)
+├── prototypes/                           # Original Research Prototype
+│   └── validate_lut.py                   # Monolithic proof-of-concept (Swish-only)
+│
+└── README.md
 ```
 
 ---
@@ -521,97 +907,47 @@ esp_ppq_lut/
 
 ### Prerequisites
 
-- **Python 3.9+** with PyTorch
-- **[esp-ppq](https://github.com/espressif/esp-ppq)**  Espressif's fork of PPQ for quantization
+- **Python 3.9+** with PyTorch and CUDA (recommended)
+- **[esp-ppq](https://github.com/espressif/esp-ppq)**   Espressif's fork of PPQ for quantization
+- **[ultralytics](https://github.com/ultralytics/ultralytics)**   For YOLO model loading and COCO dataset handling
 - **[ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/latest/esp32p4/get-started/)** v5.5 (for firmware validation only)
-- **[esp-dl](https://github.com/espressif/esp-dl)**  Deep Learning inference library for ESP32 (firmware dependency)
+- **[esp-dl](https://github.com/espressif/esp-dl)**   Deep Learning inference library for ESP32 (firmware dependency)
 
-### Quick Start  Single Activation
+### Running the YOLO26n Pipeline
 
 ```bash
-# From the root directory
-cd src
-python main.py
+cd test_yolo
+python yolo_test.py
 ```
 
 This will:
-1. Create a minimal model with a Swish activation
-2. Quantize it to INT16
-3. Fuse the Swish into a LUT node with automatic parity checking
-4. Run the exhaustive 65K-point sweep verification
-5. Export the `.espdl` model file
-
-Outputs will be in `src/outputs/`.
-
-### Full Test Suite  All Activations
-
-```bash
-# Run all three activation tests (Swish, Sigmoid, Tanh)
-cd tests_3_layers
-python run_all.py
-```
-
-This generates:
-- Parity plots for each activation's LUT pivot table
-- Exhaustive sweep comparison plots
-- C header files with test vectors
-- `.espdl` model binaries
-
-All outputs are organized under `tests_3_layers/outputs/{p4,s3}/{activation_name}/`.
+1. Export YOLO26n to ONNX
+2. Run PTQ calibration with KL divergence
+3. Run QAT training (8 epochs)
+4. Perform graph surgery (aux head removal + concat splitting)
+5. Export **two** `.espdl` models (IDEAL + LUT)
+6. Generate test vectors in both SIMULATION and IDEAL_MATH modes
+7. Generate a complete firmware project in `firmware/`
 
 ### Firmware Validation on Real Hardware
 
-After running the Python tests:
+After running the Python pipeline:
 
 ```bash
-# Navigate to the firmware project
-cd tests_3_layers/firmware
+cd test_yolo/firmware
 
-# Set target (choose one)
+# Set target
 idf.py set-target esp32p4
-# or
-idf.py set-target esp32s3
 
 # Build, flash, and monitor
 idf.py build flash monitor
 ```
 
 The firmware will:
-1. Load each `.espdl` model from flash
-2. Feed the generated test vectors through the ESP-DL runtime
-3. Compare every output value bit-by-bit against the Python simulation's predictions
-4. Report ✅ SUCCESS (Bit-Exact) or ❌ FAILURE with mismatch details
-
----
-
-## API Reference
-
-### `esp_ppq_lut.initialize(step=32, verbose=False)`
-Initializes the entire extension. Must be called before any quantization or export operations.
-- `step`  LUT segment size (default: 32, resulting in 2,049 pivot points)
-- `verbose`  Enable detailed logging
-
-### `esp_ppq_lut.EspdlLUTFusionPass`
-A `QuantizationOptimizationPass` that rewrites the computation graph.
-
-```python
-EspdlLUTFusionPass(
-    target_ops=['Swish', 'Sigmoid', 'Tanh'],  # Activation types to fuse
-    verify=True,                                # Enable pivot parity self-audit
-    plot=True,                                  # Generate verification plots
-    output_dir="outputs",                       # Output directory
-    lut_step=32,                                # Segment size
-    verbose=False                               # Detailed logging
-)
-```
-
-### `esp_ppq_lut.run_deep_verification(graph, executor, dataloader, output_dir, verbose)`
-Performs an exhaustive 65,536-point sweep for every LUT operation in the graph. Generates sweep plots, C headers, and JSON manifests.
-
-### `esp_ppq_lut.set_simulation_mode(mode)`
-Manually controls the execution mode:
-- `SimulationMode.SIMULATION`  Bit-exact hardware emulation (default)
-- `SimulationMode.IDEAL_MATH`  Pure floating-point activation
+1. **TEST 0**: Compare HW preprocessing vs Python preprocessing (expect pixel-exact match)
+2. **TEST 1**: Compare HW(LUT model) output vs SIMULATION vectors (expect ±1 match)
+3. **TEST 2**: Compare HW(LUT model) output vs IDEAL_MATH vectors (expect mismatches   proves simulation gap)
+4. **TEST 3**: Compare HW(IDEAL model) output vs IDEAL_MATH vectors (expect ±1 match   baseline sanity check)
 
 ---
 
@@ -619,20 +955,22 @@ Manually controls the execution mode:
 
 This project evolved through several iterations driven by the needs of the [YOLO26n deployment](https://github.com/BoumedineBillal/yolo26n_esp):
 
-1. **`prototypes/validate_lut.py`**  The original monolithic prototype. A single 438-line script with monkey-patching, hardcoded to Swish only. Proved the concept of bit-exact simulation but was not reusable or extensible. Born from the need to validate that INT16 LUT-based Swish could replace the prohibitively slow naive INT16 Swish in the YOLO26n detection head.
+1. **`prototypes/validate_lut.py`**   The original monolithic prototype. A single 438-line script with monkey-patching, hardcoded to Swish only. Proved the concept of bit-exact simulation but was not reusable. Used a float-domain emulator (`HardwareEmulatorV0`) that accumulated drift through layers.
 
-2. **`src/esp_ppq_lut/`**  The refactored library package. All monkey-patching replaced with clean registration APIs. Generalized emulator that works with any activation function. Dual-mode context management for correct table generation. STE backward pass enabling QAT integration.
+2. **`src/esp_ppq_lut/`**   The refactored library package. All monkey-patching replaced with clean registration APIs. Generalized emulator that works with any activation function. Dual-mode context management for correct table generation. STE backward pass enabling QAT integration.
 
-3. **`tests_3_layers/`**  The validation suite. Extended to test Swish, Sigmoid, and Tanh simultaneously. Added firmware validation on real hardware. Cross-platform support for both ESP32-P4 and ESP32-S3.
+3. **Integer-domain `HardwareEmulator`**   Complete rewrite of the emulator from float-domain to pure `torch.int32` arithmetic. Added LUT table caching for QAT performance. Implemented C-style truncation-toward-zero for exact hardware parity. Deprecated `HardwareEmulatorV0`.
+
+4. **`test_yolo/yolo_test.py`**   YOLO26n end-to-end validation. Full PTQ+QAT pipeline with graph surgery, dual-model export (LUT + IDEAL), ESP-DL-matched preprocessing, and the 4-test firmware validation protocol. Proved bit-exact simulation accuracy on 451,584 output values across 6 tensor outputs on real ESP32-P4 hardware.
 
 ---
 
 ## Related Work
 
-- **[YOLO26n for ESP32](https://github.com/BoumedineBillal/yolo26n_esp)**  The NMS-free YOLO architecture that motivated this library. Achieves 1.3x faster inference than YOLOv11n on ESP32-P4.
-- **[esp-dl PR #286](https://github.com/espressif/esp-dl/pull/286)**  The upstream pull request to integrate YOLO26n into the official ESP-DL examples, where the fencepost bug was reported and the LUT approach was proposed.
-- **[esp-ppq](https://github.com/espressif/esp-ppq)**  Espressif's quantization toolkit (fork of PPQ). This library extends it with hardware-faithful LUT simulation.
-- **[esp-dl](https://github.com/espressif/esp-dl)**  Espressif's deep learning inference library for ESP32 chips. Contains the LUT runtime that this library emulates.
+- **[YOLO26n for ESP32](https://github.com/BoumedineBillal/yolo26n_esp)**   The NMS-free YOLO architecture that motivated this library. Achieves 1.3x faster inference than YOLOv11n on ESP32-P4.
+- **[esp-dl PR #286](https://github.com/espressif/esp-dl/pull/286)**   The upstream pull request to integrate YOLO26n into the official ESP-DL examples, where the fencepost bug was reported and the LUT approach was proposed.
+- **[esp-ppq](https://github.com/espressif/esp-ppq)**   Espressif's quantization toolkit (fork of PPQ). This library extends it with hardware-faithful LUT simulation.
+- **[esp-dl](https://github.com/espressif/esp-dl)**   Espressif's deep learning inference library for ESP32 chips. Contains the LUT runtime that this library emulates.
 
 ---
 

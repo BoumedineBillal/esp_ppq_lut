@@ -193,4 +193,8 @@ class QATTrainer:
         # Re-initialize executor with the new graph
         self._executor = TorchExecutor(self.graph, device=self._device)
         self._training_graph = TrainableGraph(self.graph)
+        
+        # FIX: Update the validator's executor to use the new graph
+        # Without this, the validator keeps using the stale executor from __init__
+        self.validator.executor = self._executor
         return self.graph

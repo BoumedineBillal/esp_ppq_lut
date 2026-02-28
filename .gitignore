@@ -15,4 +15,8 @@ test_yolo/yolo_test copy.py
 test_yolo/yolo_test temp.py
 test_yolo copy/
 test_yolo/output 366/
+runs/
+.vscode/
+
+
 

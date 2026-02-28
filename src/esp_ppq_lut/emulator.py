@@ -29,62 +29,6 @@ class GlobalMode:
     def get(cls) -> SimulationMode:
         return cls._current_mode
 
-class HardwareEmulatorV0(torch.autograd.Function):
-    """
-    [DEPRECATED] Original float-domain LUT emulator.
-    Kept for reference. Has float drift that compounds through layers.
-    Implements: output = x + trunc((len * (y - x)) / step)  in FLOAT
-    """
-    @staticmethod
-    def forward(ctx, input_tensor, math_fn, op_context, in_scale, out_scale, step, rounding):
-        ctx.math_fn = math_fn
-        ctx.op_context = op_context
-        ctx.save_for_backward(input_tensor)
-
-        if isinstance(in_scale, torch.Tensor) and in_scale.ndim > 0:
-            in_scale = in_scale.view(1, -1, 1, 1) if input_tensor.ndim == 4 else in_scale
-            
-        input_int = ppq_tensor_round(input_tensor / in_scale, rounding)
-        input_signed = torch.clamp(input_int, -32768, 32767).to(torch.int32)
-
-        idx_shifted = input_signed + 32768
-        base_idx = idx_shifted // step
-        remainder = idx_shifted % step
-
-        x_int = (base_idx * step) - 32768
-        y_int = x_int + step
-        
-        x_real = x_int * in_scale
-        y_real = y_int * in_scale
-
-        x_ideal = math_fn(op_context, [x_real])
-        y_ideal = math_fn(op_context, [y_real])
-
-        if isinstance(out_scale, torch.Tensor) and out_scale.ndim > 0:
-            out_scale = out_scale.view(1, -1, 1, 1) if x_ideal.ndim == 4 else out_scale
-            
-        x_quant = ppq_tensor_round(x_ideal / out_scale, rounding).clamp(-32768, 32767)
-        y_quant = ppq_tensor_round(y_ideal / out_scale, rounding).clamp(-32768, 32767)
-
-        delta_y = y_quant - x_quant
-        interpolation = torch.trunc((remainder * delta_y) / step)
-        output_quant = x_quant + interpolation
-
-        return output_quant.clamp(-32768, 32767) * out_scale
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        input_tensor, = ctx.saved_tensors
-        math_fn = ctx.math_fn
-        op_context = ctx.op_context
-
-        with torch.enable_grad():
-            x = input_tensor.detach().requires_grad_(True)
-            y = math_fn(op_context, [x])
-            grad = torch.autograd.grad(y.sum(), x)[0]
-        
-        return grad_output * grad, None, None, None, None, None, None
-
 
 class HardwareEmulator(torch.autograd.Function):
     """
@@ -154,7 +98,10 @@ class HardwareEmulator(torch.autograd.Function):
         else:
             in_scale_bc = in_scale
 
-        input_int = ppq_tensor_round(input_tensor / in_scale_bc, rounding)
+        # Use float64 for the division to avoid float32 rounding amplification
+        # when in_scale_bc is very small (same rationale as the FP64 Conv patch).
+        # The result is immediately rounded to int32 so the pipeline stays float32.
+        input_int = ppq_tensor_round(input_tensor.double() / in_scale_bc.double(), rounding)
         input_int = torch.clamp(input_int, -32768, 32767).to(torch.int32)
 
         # --- Step 2: Build or retrieve the LUT table ---

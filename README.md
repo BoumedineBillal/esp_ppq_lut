@@ -57,9 +57,9 @@ The journey to solve this revealed a chain of precision challenges:
 | 1 | Standard INT8 (all layers) | ❌ Very low mAP | ✅ Fast | Classification OK, but regression destroyed |
 | 2 | Mixed: INT16 Conv + INT8 Activation | ❌ Still low | ✅ Fast | INT8 Swish acts as precision bottleneck between INT16 conv layers |
 | 3 | INT16 Conv + INT16 Swish (naive) | ✅ Good mAP | ❌ **~660ms/layer** | ESP-DL falls through to: `dequant → float32 Swish → requant` |
-| 4 | **INT16 LUT with interpolation** | ✅ **0.375 mAP** | ✅ 2000ms (+18%) | **This library   Hardware-accelerated, 4KB per table** |
+| 4 | **INT16 LUT with interpolation** | ✅ **0.365 mAP** | ✅ 2062ms (+16%) | **This library   Hardware-accelerated, 4KB per table** |
 
-> **Note**: An earlier reported mAP of 0.362 was [invalid](https://github.com/BoumedineBillal/yolo26n_esp/issues/1)   it evaluated the wrong head (One-to-Many with NMS instead of One-to-One). The correct QAT + LUT result on the o1o head is **0.375 mAP50-95**.
+> **Note**: An earlier reported PTQ baseline of 0.349 mAP failed to improve with QAT because quantization noise destroyed the bounding box regression. By expanding the INT16 layer selection and using this LUT library, the QAT + LUT result on the one-to-one head reaches **0.365 mAP50-95** (with **0 errors** against real hardware).
 
 <p align="center">
   <img src="assets/accuracy_comparison.png" width="700"><br>
@@ -68,7 +68,7 @@ The journey to solve this revealed a chain of precision challenges:
 
 <p align="center">
   <img src="assets/latency_comparison.png" width="700"><br>
-  <b>Figure 2</b>: Inference latency on ESP32-P4. Naive INT16 Swish adds ~660ms per layer (unusable). LUT interpolation adds only 300ms total (+18%).
+  <b>Figure 2</b>: Inference latency on ESP32-P4. Naive INT16 Swish adds ~660ms per layer (pushing total beyond 5 seconds). LUT interpolation adds only 282ms total (+16%).
 </p>
 
 The critical finding: **INT16 Swish was necessary for accuracy, but the only fast path on ESP-DL is the LUT with linear interpolation**. A brute-force INT16 LUT (2¹⁶ × 2 bytes = 128KB per layer) is too large. Instead, ESP-DL supports a **compressed 4KB LUT** (2,049 entries × step size 32) with hardware-accelerated linear interpolation between entries.
@@ -655,7 +655,7 @@ current_step = op.attributes.get("int16_lut_step", self.int16_step)
 
 **Problem**: Full INT8 destroys YOLO26n's box regression accuracy. Full INT16 is too slow (naive float fallback).
 
-**Solution**: **30 layers** explicitly promoted to INT16   specifically the **box head** and **class head** Conv+Swish pairs across all 3 scales (P3/P4/P5). The shared backbone stays INT8 for speed. Final 1×1 projections stay INT8.
+**Solution**: **48 layers** explicitly promoted to INT16   specifically the **neck exits** (model.16/19/22) and the **box/class head** Conv+Swish pairs across all 3 scales (P3/P4/P5), plus final 1x1 projections. The shared backbone stays INT8 for speed.
 
 **Why these layers?**: YOLO26n's one2one head uses RegMax=1 direct regression   there's no DFL (Distribution Focal Loss) to absorb quantization noise. Every bit of precision in the head's intermediate activations matters.
 
@@ -745,15 +745,15 @@ The firmware executes 4 sequential tests on real ESP32-P4 hardware. Each test is
 
 | Output | Total Values | Mismatches | Rate |
 |--------|-------------|------------|------|
-| `one2one_p3_box` | 16,384 | 82 | 0.5% |
-| `one2one_p3_cls` | 327,680 | 13,707 | 4.2% |
-| `one2one_p4_box` | 4,096 | 28 | 0.7% |
-| `one2one_p4_cls` | 81,920 | 3,614 | 4.4% |
-| `one2one_p5_box` | 1,024 | 11 | 1.1% |
-| `one2one_p5_cls` | 20,480 | 2,194 | 10.7% |
-| **TOTAL** | **451,584** | **19,636** | **4.3%** |
+| `one2one_p3_box` | 16,384 | 11,698 | 71.3% |
+| `one2one_p3_cls` | 327,680 | 280,500 | 85.6% |
+| `one2one_p4_box` | 4,096 | 4,040 | 98.6% |
+| `one2one_p4_cls` | 81,920 | 81,385 | 99.3% |
+| `one2one_p5_box` | 1,024 | 1,016 | 99.2% |
+| `one2one_p5_cls` | 20,480 | 20,405 | 99.6% |
+| **TOTAL** | **451,584** | **399,044** | **88.3%** |
 
-> **Analysis**: 4.3% of output values differ between LUT and float   confirming the simulation gap. The mismatch count (19,636) is **higher** than TEST 1 (14,494), proving that `SIMULATION` mode is closer to hardware than `IDEAL_MATH`. The `cls` outputs show higher divergence because classification logits are more sensitive to activation precision. This is the exact problem `esp_ppq_lut` solves.
+> **Analysis**: 88.3% of output values differ between the full LUT HW model and the IDEAL float model. Without `esp_ppq_lut`, Python would predict 399,044 wrong values compared to what actually runs on-chip. This massive divergence is precisely the problem `esp_ppq_lut` solves by closing the simulation gap.
 
 #### TEST 3: Baseline Correctness   Sanity Check
 
@@ -769,15 +769,15 @@ The firmware executes 4 sequential tests on real ESP32-P4 hardware. Each test is
 
 | Output | Total Values | Mismatches | Rate | Max Error | Status |
 |--------|-------------|------------|------|-----------|--------|
-| `one2one_p3_box` | 16,384 | 0 | 0% | 0 | ✅ Bit-Exact |
-| `one2one_p3_cls` | 327,680 | 11,934 | 3.6% | ±1 | ✅ Pass ±1 |
-| `one2one_p4_box` | 4,096 | 14 | 0.3% | ±1 | ✅ Pass ±1 |
-| `one2one_p4_cls` | 81,920 | 1,697 | 2.1% | ±1 | ✅ Pass ±1 |
-| `one2one_p5_box` | 1,024 | 1 | 0.1% | ±1 | ✅ Pass ±1 |
-| `one2one_p5_cls` | 20,480 | 650 | 3.2% | ±1 | ✅ Pass ±1 |
-| **TOTAL** | **451,584** | **14,296** | **3.2%** | **±1** | **✅ PASS** |
+| `one2one_p3_box` | 16,384 | 37 | 0.2% | ±3 | ✅ Pass ±5 |
+| `one2one_p3_cls` | 327,680 | 11,121 | 3.3% | ±5 | ✅ Pass ±5 |
+| `one2one_p4_box` | 4,096 | 2 | 0.05% | ±1 | ✅ Pass ±5 |
+| `one2one_p4_cls` | 81,920 | 353 | 0.4% | ±2 | ✅ Pass ±5 |
+| `one2one_p5_box` | 1,024 | 1 | 0.1% | ±1 | ✅ Pass ±5 |
+| `one2one_p5_cls` | 20,480 | 69 | 0.3% | ±1 | ✅ Pass ±5 |
+| **TOTAL** | **451,584** | **11,583** | **2.5%** | **±5** | **✅ PASS** |
 
-> **Analysis**: The IDEAL model passes with nearly identical ±1 statistics as TEST 1 (14,296 vs 14,494). This confirms: (1) the test infrastructure is correct, (2) the ±1 mismatches originate from the **shared INT8 backbone**, not the activation function, and (3) the LUT model performs **at parity** with the reference float Swish model.
+> **Analysis**: The IDEAL model passes within the expected ±5 tolerance. This confirms the test infrastructure is correct by validating the IDEAL model independently. The mismatches here come from slight differences between PyTorch float operations and the pure C++ fallback math, whereas the LUT model perfectly synchronized the two domains.
 
 ---
 
@@ -788,9 +788,9 @@ The firmware executes 4 sequential tests on real ESP32-P4 hardware. Each test is
 | Test | Model | Reference | Total Values | Mismatches | Max Error | Status |
 |------|-------|-----------|-------------|------------|-----------|--------|
 | **TEST 0** |   | Preprocessing | 786,432 | 0 | 0 | ✅ Pixel-Exact |
-| **TEST 1** | LUT | SIMULATION | 451,584 | 14,494 (3.2%) | ±1 | ✅ Pass |
-| **TEST 2** | LUT | IDEAL_MATH | 451,584 | 19,636 (4.3%) | ±1 | ⚠️ Expected Divergence |
-| **TEST 3** | IDEAL | IDEAL_MATH | 451,584 | 14,296 (3.2%) | ±1 | ✅ Baseline Pass |
+| **TEST 1** | LUT | SIMULATION | 451,584 | 0 (0%) | 0 | ✅ 100% Bit-Exact |
+| **TEST 2** | LUT | IDEAL_MATH | 451,584 | 399,044 (88.3%) | [-2458, 3179] | ⚠️ Expected Divergence |
+| **TEST 3** | IDEAL | IDEAL_MATH | 451,584 | 11,583 (2.5%) | [-5, 3] | ✅ Baseline Pass |
 
 <p align="center">
   <img src="assets/netron_lut_layers.png" width="600"><br>
@@ -800,51 +800,59 @@ The firmware executes 4 sequential tests on real ESP32-P4 hardware. Each test is
 #### Full Firmware Log
 
 ```
-I (2969) YOLO26_VAL: ==========================================================
-I (2979) YOLO26_VAL:    YOLO26n PTQ Triple-Mode Validation
-I (2989) YOLO26_VAL:    IMG_SZ: 512, LUT_STEP: 32
-I (2989) YOLO26_VAL:    TARGET: ESP32-P4
-I (2989) YOLO26_VAL: ==========================================================
-
-I (3009) YOLO26_VAL: Loading LUT Model (Model A)...
-I (3399) YOLO26_VAL: [LUT] Input size: 786432, scale: 0.00781250
-
-I (3409) YOLO26_VAL: TEST 0: HW(LUT Preprocess) vs Python(test_input)   expect match (+/-1 tol)
-I (3539) YOLO26_VAL:   input_tensor: PASS (786432 values, err: 0)
-
-I (3539) YOLO26_VAL: [LUT] Running inference...
-
-I (5529) YOLO26_VAL: TEST 1: HW(LUT model) vs SIMULATION   expect match (+/-1 tol)
-I (5539) YOLO26_VAL:   one2one_p3_box: PASS (16384 values, err: 0)
-I (5609) YOLO26_VAL:   one2one_p3_cls: PASS +/-1 (11880/327680 mismatches, err_range:[-1,1])
-I (5619) YOLO26_VAL:   one2one_p4_box: PASS +/-1 (14/4096 mismatches, err_range:[-1,1])
-I (5649) YOLO26_VAL:   one2one_p4_cls: PASS +/-1 (1736/81920 mismatches, err_range:[-1,1])
-I (5669) YOLO26_VAL:   one2one_p5_box: PASS +/-1 (3/1024 mismatches, err_range:[-1,1])
-I (5689) YOLO26_VAL:   one2one_p5_cls: PASS +/-1 (861/20480 mismatches, err_range:[-1,1])
-I (5699) YOLO26_VAL:   TOTAL PASS within +/-1: 14494/451584 mismatches (err_range:[-1,1], 6 outputs)
-
-I (5719) YOLO26_VAL: TEST 2: HW(LUT model) vs IDEAL_MATH   expect mismatches
-I (5739) YOLO26_VAL:   one2one_p3_box: 82/16384 mismatches (err_range:[-1,1])
-I (5809) YOLO26_VAL:   one2one_p3_cls: 13707/327680 mismatches (err_range:[-1,1])
-I (5819) YOLO26_VAL:   one2one_p4_box: 28/4096 mismatches (err_range:[-1,1])
-I (5859) YOLO26_VAL:   one2one_p4_cls: 3614/81920 mismatches (err_range:[-1,1])
-I (5869) YOLO26_VAL:   one2one_p5_box: 11/1024 mismatches (err_range:[-1,1])
-I (5899) YOLO26_VAL:   one2one_p5_cls: 2194/20480 mismatches (err_range:[-1,1])
-I (5899) YOLO26_VAL:   TOTAL: 19636 mismatches (err_range:[-1,1])
-
-I (5959) YOLO26_VAL: Loading IDEAL Model (Model B)...
-I (6449) YOLO26_VAL: [IDEAL] Running inference...
-
-I (12179) YOLO26_VAL: TEST 3: HW(IDEAL model) vs IDEAL_MATH   expect match (+/-1 tol)
-I (12189) YOLO26_VAL:   one2one_p3_box: PASS (16384 values, err: 0)
-I (12259) YOLO26_VAL:   one2one_p3_cls: PASS +/-1 (11934/327680 mismatches, err_range:[-1,1])
-I (12269) YOLO26_VAL:   one2one_p4_box: PASS +/-1 (14/4096 mismatches, err_range:[-1,1])
-I (12309) YOLO26_VAL:   one2one_p4_cls: PASS +/-1 (1697/81920 mismatches, err_range:[-1,1])
-I (12309) YOLO26_VAL:   one2one_p5_box: PASS +/-1 (1/1024 mismatches, err_range:[0,1])
-I (12339) YOLO26_VAL:   one2one_p5_cls: PASS +/-1 (650/20480 mismatches, err_range:[-1,1])
-I (12339) YOLO26_VAL:   TOTAL PASS within +/-1: 14296/451584 mismatches (err_range:[-1,1], 6 outputs)
-
-I (12359) YOLO26_VAL: Validation Finished.
+I (3003) YOLO26_VAL: ==========================================================
+I (3013) YOLO26_VAL:    YOLO26n PTQ Triple-Mode Validation
+I (3023) YOLO26_VAL:    IMG_SZ: 512, LUT_STEP: 32
+I (3023) YOLO26_VAL:    TARGET: ESP32-P4
+I (3023) YOLO26_VAL: ==========================================================
+I (3033) YOLO26_VAL: ----------------------------------------------------------
+I (3043) YOLO26_VAL: Loading LUT Model (Model A)...
+I (3433) YOLO26_VAL: [LUT] Input size: 786432, scale: 0.01562500
+I (3433) YOLO26_VAL: ----------------------------------------------------------
+I (3433) YOLO26_VAL: TEST 0: HW(LUT Preprocess) vs Python(test_input)   expect match (+/-1 tol)
+I (3573) YOLO26_VAL:   input_tensor: PASS (786432 values, err: 0)
+I (3573) YOLO26_VAL: [LUT] Running inference...
+I (5633) YOLO26_VAL: ----------------------------------------------------------
+I (5643) YOLO26_VAL: TEST 1: HW(LUT model) vs SIMULATION   expect match (+/-5 tol)
+I (5643) YOLO26_VAL:   one2one_p3_box: PASS (16384 values, err: 0)
+I (5703) YOLO26_VAL:   one2one_p3_cls: PASS (327680 values, err: 0)
+I (5703) YOLO26_VAL:   one2one_p4_box: PASS (4096 values, err: 0)
+I (5723) YOLO26_VAL:   one2one_p4_cls: PASS (81920 values, err: 0)
+I (5723) YOLO26_VAL:   one2one_p5_box: PASS (1024 values, err: 0)
+I (5723) YOLO26_VAL:   one2one_p5_cls: PASS (20480 values, err: 0)
+I (5733) YOLO26_VAL:   TOTAL PASS: 100% Bit-Exact (451584 values, 6 outputs)
+I (5733) YOLO26_VAL: ----------------------------------------------------------
+I (5743) YOLO26_VAL: TEST 2: HW(LUT model) vs IDEAL_MATH   expect mismatches
+I (5773) YOLO26_VAL:   one2one_p3_box: 11698/16384 mismatches (err_range:[-11,10])
+I (5863) YOLO26_VAL:   one2one_p3_cls: 280500/327680 mismatches (err_range:[-16,16])
+I (5873) YOLO26_VAL:   one2one_p4_box: 4040/4096 mismatches (err_range:[-2458,1896])
+I (5923) YOLO26_VAL:   one2one_p4_cls: 81385/81920 mismatches (err_range:[-1718,2236])
+I (5933) YOLO26_VAL:   one2one_p5_box: 1016/1024 mismatches (err_range:[-2047,3179])
+I (5963) YOLO26_VAL:   one2one_p5_cls: 20405/20480 mismatches (err_range:[-1411,1529])
+I (5963) YOLO26_VAL:   TOTAL: 399044 mismatches (err_range:[-2458,3179])
+I (5973) YOLO26_VAL: ----------------------------------------------------------
+I (5983) YOLO26_VAL: Running YOLO26 Post-Processing...
+I (5993) YOLO26_VAL: Pre: 22 ms | Inf: 2062 ms | Post: 13 ms
+I (5993) YOLO26: === Testing: person.jpg ===
+I (5993) YOLO26: [category: person, score: 0.91, x1: 328, y1: 173, x2: 404, y2: 379]
+I (6003) YOLO26: [category: bicycle, score: 0.83, x1: 189, y1: 307, x2: 382, y2: 409]
+I (6013) YOLO26: [category: bicycle, score: 0.41, x1: 121, y1: 133, x2: 194, y2: 182]
+I (6023) YOLO26: [category: person, score: 0.34, x1: 147, y1: 196, x2: 175, y2: 221]
+I (6043) YOLO26_VAL: ----------------------------------------------------------
+I (6043) YOLO26_VAL: Loading IDEAL Model (Model B)...
+I (6403) YOLO26_VAL: [IDEAL] Input size: 786432, scale: 0.01562500
+I (6523) YOLO26_VAL: [IDEAL] Running inference...
+I (13193) YOLO26_VAL: ----------------------------------------------------------
+I (13193) YOLO26_VAL: TEST 3: HW(IDEAL model) vs IDEAL_MATH   expect match (+/-5 tol)
+I (13213) YOLO26_VAL:   one2one_p3_box: PASS +/-5 (37/16384 mismatches, err_range:[-3,3])
+I (13303) YOLO26_VAL:   one2one_p3_cls: PASS +/-5 (11121/327680 mismatches, err_range:[-5,3])
+I (13313) YOLO26_VAL:   one2one_p4_box: PASS +/-5 (2/4096 mismatches, err_range:[-1,0])
+I (13343) YOLO26_VAL:   one2one_p4_cls: PASS +/-5 (353/81920 mismatches, err_range:[-2,2])
+I (13353) YOLO26_VAL:   one2one_p5_box: PASS +/-5 (1/1024 mismatches, err_range:[0,1])
+I (13373) YOLO26_VAL:   one2one_p5_cls: PASS +/-5 (69/20480 mismatches, err_range:[-1,1])
+I (13383) YOLO26_VAL:   TOTAL PASS within +/-5: 11583/451584 mismatches (err_range:[-5,3], 6 outputs)
+I (13403) YOLO26_VAL: ==========================================================
+I (13403) YOLO26_VAL: Validation Finished.
 ```
 
 ### Detection Results
@@ -852,10 +860,10 @@ I (12359) YOLO26_VAL: Validation Finished.
 The LUT model produces correct object detection results on `person.jpg`:
 
 ```
-YOLO26: [category: person,  score: 0.92, x1: 328, y1: 172, x2: 404, y2: 380]
-YOLO26: [category: bicycle, score: 0.88, x1: 188, y1: 308, x2: 388, y2: 412]
-YOLO26: [category: truck,   score: 0.62, x1: 108, y1: 132, x2: 204, y2: 284]
-YOLO26: [category: bicycle, score: 0.27, x1: 122, y1: 134, x2: 192, y2: 182]
+YOLO26: [category: person, score: 0.91, x1: 328, y1: 173, x2: 404, y2: 379]
+YOLO26: [category: bicycle, score: 0.83, x1: 189, y1: 307, x2: 382, y2: 409]
+YOLO26: [category: bicycle, score: 0.41, x1: 121, y1: 133, x2: 194, y2: 182]
+YOLO26: [category: person, score: 0.34, x1: 147, y1: 196, x2: 175, y2: 221]
 ```
 
 ---

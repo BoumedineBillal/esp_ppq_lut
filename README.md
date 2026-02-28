@@ -723,14 +723,14 @@ The firmware executes 4 sequential tests on real ESP32-P4 hardware. Each test is
 | Output | Total Values | Mismatches | Rate | Max Error | Status |
 |--------|-------------|------------|------|-----------|--------|
 | `one2one_p3_box` | 16,384 | 0 | 0% | 0 | ✅ Bit-Exact |
-| `one2one_p3_cls` | 327,680 | 11,880 | 3.6% | ±1 | ✅ Pass ±1 |
-| `one2one_p4_box` | 4,096 | 14 | 0.3% | ±1 | ✅ Pass ±1 |
-| `one2one_p4_cls` | 81,920 | 1,736 | 2.1% | ±1 | ✅ Pass ±1 |
-| `one2one_p5_box` | 1,024 | 3 | 0.3% | ±1 | ✅ Pass ±1 |
-| `one2one_p5_cls` | 20,480 | 861 | 4.2% | ±1 | ✅ Pass ±1 |
-| **TOTAL** | **451,584** | **14,494** | **3.2%** | **±1** | **✅ PASS** |
+| `one2one_p3_cls` | 327,680 | 0 | 0% | 0 | ✅ Bit-Exact |
+| `one2one_p4_box` | 4,096 | 0 | 0% | 0 | ✅ Bit-Exact |
+| `one2one_p4_cls` | 81,920 | 0 | 0% | 0 | ✅ Bit-Exact |
+| `one2one_p5_box` | 1,024 | 0 | 0% | 0 | ✅ Bit-Exact |
+| `one2one_p5_cls` | 20,480 | 0 | 0% | 0 | ✅ Bit-Exact |
+| **TOTAL** | **451,584** | **0** | **0%** | **0** | **✅ PASS 100% Bit-Exact** |
 
-> **Analysis**: All errors are exactly ±1 LSB   no single element exceeds tolerance. The ±1 mismatches originate from intermediate INT8 rounding in the shared Conv backbone (before the INT16 head), not from the LUT emulation itself. This is standard for mixed-precision quantized inference and is expected in TEST 3 as well (see below).
+> **Analysis**: The Python `esp_ppq_lut` HardwareEmulator and the ESP32-P4 LUT hardware produce **identical outputs** for all 451,584 values. Achieving this exact parity required our togglable FP64 Conv patch in PyTorch because native Python `float32` accumulation truncates precision on large dense convolutions, whereas the ESP32-P4 uses native 64-bit integer accumulators. With the patch, Python matches the hardware perfectly.
 
 #### TEST 2: LUT vs Float Divergence   The Control Test
 
@@ -743,17 +743,17 @@ The firmware executes 4 sequential tests on real ESP32-P4 hardware. Each test is
 
 **Result:**
 
-| Output | Total Values | Mismatches | Rate |
-|--------|-------------|------------|------|
-| `one2one_p3_box` | 16,384 | 11,698 | 71.3% |
-| `one2one_p3_cls` | 327,680 | 280,500 | 85.6% |
-| `one2one_p4_box` | 4,096 | 4,040 | 98.6% |
-| `one2one_p4_cls` | 81,920 | 81,385 | 99.3% |
-| `one2one_p5_box` | 1,024 | 1,016 | 99.2% |
-| `one2one_p5_cls` | 20,480 | 20,405 | 99.6% |
-| **TOTAL** | **451,584** | **399,044** | **88.3%** |
+| Output | Total Values | Mismatches | Rate | Max Error |
+|--------|-------------|------------|------|-----------|
+| `one2one_p3_box` | 16,384 | 11,698 | 71.3% | [-11, 10] |
+| `one2one_p3_cls` | 327,680 | 280,500 | 85.6% | [-16, 16] |
+| `one2one_p4_box` | 4,096 | 4,040 | 98.6% | [-2458, 1896] |
+| `one2one_p4_cls` | 81,920 | 81,385 | 99.3% | [-1718, 2236] |
+| `one2one_p5_box` | 1,024 | 1,016 | 99.2% | [-2047, 3179] |
+| `one2one_p5_cls` | 20,480 | 20,405 | 99.6% | [-1411, 1529] |
+| **TOTAL** | **451,584** | **399,044** | **88.4%** | **[-2458, 3179]** |
 
-> **Analysis**: 88.3% of output values differ between the full LUT HW model and the IDEAL float model. Without `esp_ppq_lut`, Python would predict 399,044 wrong values compared to what actually runs on-chip. This massive divergence is precisely the problem `esp_ppq_lut` solves by closing the simulation gap.
+> **Analysis**: 88.4% of output values differ between the full LUT HW model and the IDEAL float model. Without `esp_ppq_lut`, Python would predict 399,044 wrong values compared to what actually runs on-chip. This massive divergence is precisely the problem `esp_ppq_lut` solves by closing the simulation gap.
 
 #### TEST 3: Baseline Correctness   Sanity Check
 
@@ -769,13 +769,13 @@ The firmware executes 4 sequential tests on real ESP32-P4 hardware. Each test is
 
 | Output | Total Values | Mismatches | Rate | Max Error | Status |
 |--------|-------------|------------|------|-----------|--------|
-| `one2one_p3_box` | 16,384 | 37 | 0.2% | ±3 | ✅ Pass ±5 |
-| `one2one_p3_cls` | 327,680 | 11,121 | 3.3% | ±5 | ✅ Pass ±5 |
-| `one2one_p4_box` | 4,096 | 2 | 0.05% | ±1 | ✅ Pass ±5 |
-| `one2one_p4_cls` | 81,920 | 353 | 0.4% | ±2 | ✅ Pass ±5 |
-| `one2one_p5_box` | 1,024 | 1 | 0.1% | ±1 | ✅ Pass ±5 |
-| `one2one_p5_cls` | 20,480 | 69 | 0.3% | ±1 | ✅ Pass ±5 |
-| **TOTAL** | **451,584** | **11,583** | **2.5%** | **±5** | **✅ PASS** |
+| `one2one_p3_box` | 16,384 | 37 | 0.2% | [-3, 3] | ✅ Pass ±5 |
+| `one2one_p3_cls` | 327,680 | 11,121 | 3.3% | [-5, 3] | ✅ Pass ±5 |
+| `one2one_p4_box` | 4,096 | 2 | 0.05% | [-1, 0] | ✅ Pass ±5 |
+| `one2one_p4_cls` | 81,920 | 353 | 0.4% | [-2, 2] | ✅ Pass ±5 |
+| `one2one_p5_box` | 1,024 | 1 | 0.1% | [0, 1] | ✅ Pass ±5 |
+| `one2one_p5_cls` | 20,480 | 69 | 0.3% | [-1, 1] | ✅ Pass ±5 |
+| **TOTAL** | **451,584** | **11,583** | **2.5%** | **[-5, 3]** | **✅ PASS** |
 
 > **Analysis**: The IDEAL model passes within the expected ±5 tolerance. This confirms the test infrastructure is correct by validating the IDEAL model independently. The mismatches here come from slight differences between PyTorch float operations and the pure C++ fallback math, whereas the LUT model perfectly synchronized the two domains.
 
@@ -789,7 +789,7 @@ The firmware executes 4 sequential tests on real ESP32-P4 hardware. Each test is
 |------|-------|-----------|-------------|------------|-----------|--------|
 | **TEST 0** |   | Preprocessing | 786,432 | 0 | 0 | ✅ Pixel-Exact |
 | **TEST 1** | LUT | SIMULATION | 451,584 | 0 (0%) | 0 | ✅ 100% Bit-Exact |
-| **TEST 2** | LUT | IDEAL_MATH | 451,584 | 399,044 (88.3%) | [-2458, 3179] | ⚠️ Expected Divergence |
+| **TEST 2** | LUT | IDEAL_MATH | 451,584 | 399,044 (88.4%) | [-2458, 3179] | ⚠️ Expected Divergence |
 | **TEST 3** | IDEAL | IDEAL_MATH | 451,584 | 11,583 (2.5%) | [-5, 3] | ✅ Baseline Pass |
 
 <p align="center">

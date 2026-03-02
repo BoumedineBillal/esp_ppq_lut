@@ -13,6 +13,7 @@ tests_3_layers/
 test_yolo/generate_assets.py
 test_yolo/yolo_test copy.py
 test_yolo/yolo_test temp.py
+test_yolo/yolo_test_stable.py
 test_yolo copy/
 test_yolo/output 366/
 runs/

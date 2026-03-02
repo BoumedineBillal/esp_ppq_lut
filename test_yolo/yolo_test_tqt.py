@@ -447,7 +447,6 @@ if __name__ == '__main__':
             lr=1e-5,                           
             int_lambda=0.25,
             block_size=1,
-            #calib_steps=128,         # independent from pipeline CALIB_STEPS=64
             collecting_device= "cpu" # cpu for more ram then cuda vram
         ),
  
